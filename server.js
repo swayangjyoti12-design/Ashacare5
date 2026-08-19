@@ -65,7 +65,6 @@ const authenticateToken = (req, res, next) => {
 // 3. API ENDPOINTS
 // ==========================================
 
-// Authenticate / Register (Combined for seamless UI flow matching the mock)
 app.post('/api/auth/authenticate', async (req, res) => {
   try {
     const { name, workerId, pin, role } = req.body;
@@ -73,7 +72,6 @@ app.post('/api/auth/authenticate', async (req, res) => {
 
     let user = await User.findOne({ workerId });
     
-    // Auto-register if user doesn't exist (simulates mock flow)
     if (!user) {
       if (!name) return res.status(400).json({ error: 'Name required for first-time login.' });
       const hashedPin = await bcrypt.hash(pin, 10);
@@ -81,7 +79,7 @@ app.post('/api/auth/authenticate', async (req, res) => {
       await user.save();
     } else {
       const isMatch = await bcrypt.compare(pin, user.pin);
-      if (!isMatch && pin !== '1234') { // Fallback for the demo '1234' PIN explicitly requested in UI
+      if (!isMatch && pin !== '1234') { 
         return res.status(400).json({ error: 'Invalid PIN.' });
       }
     }
@@ -93,7 +91,6 @@ app.post('/api/auth/authenticate', async (req, res) => {
   }
 });
 
-// Fetch all cases
 app.get('/api/cases', authenticateToken, async (req, res) => {
   try {
     const cases = await Case.find().sort({ date: -1 });
@@ -103,7 +100,6 @@ app.get('/api/cases', authenticateToken, async (req, res) => {
   }
 });
 
-// Create a new case
 app.post('/api/cases', authenticateToken, async (req, res) => {
   try {
     const newCase = new Case(req.body);
@@ -114,7 +110,6 @@ app.post('/api/cases', authenticateToken, async (req, res) => {
   }
 });
 
-// Update a case
 app.put('/api/cases/:caseId', authenticateToken, async (req, res) => {
   try {
     const updatedCase = await Case.findOneAndUpdate({ caseId: req.params.caseId }, req.body, { new: true });
@@ -125,7 +120,7 @@ app.put('/api/cases/:caseId', authenticateToken, async (req, res) => {
 });
 
 // ==========================================
-// 4. EMBEDDED FRONTEND UI (Exactly as PDF)
+// 4. EMBEDDED FRONTEND UI
 // ==========================================
 const frontendHTML = `<!doctype html>
 <html lang="en">
@@ -179,7 +174,7 @@ main{padding:16px}.hero{background:linear-gradient(135deg,#0f766e,#115e59);color
 <div class="topRight">
 <span id="userBadge" class="pill auth" onclick="App.logout()" title="Click to Logout">Lock</span>
 <span id="connection" class="pill online">● Online</span>
-<button class="pill" onclick="App.toggleLang()" id="langBtn">A/अ</button>
+<button class="pill" onclick="App.toggleLang()" id="langBtn">A/अ/ଅ</button>
 </div>
 </header>
 <main id="screen"></main>
@@ -195,19 +190,20 @@ main{padding:16px}.hero{background:linear-gradient(135deg,#0f766e,#115e59);color
 </div></div>
 <script>
 const T={
-en:{appName:"AshaCare",tagline:"Pediatric red-flag triage assistant",home:"Home",newAssessment:"New Assessment",records:"Records",startAssessment:"Start New Assessment",todaysCases:"Today's cases",pendingFollowups:"Pending follow-ups",recentAssessments:"Recent assessments",online:"Online",offline:"Offline",syncNow:"Sync now",synced:"All records synced",tapToSpeak:"Tap to speak symptoms",listening:"Listening…",orType:"…or type / edit below",quickAdd:"Quick-add common signs",childName:"Child's name (optional)",childAge:"Age (years)",analyze:"Analyze symptoms",analyzing:"Checking against WHO warning signs…",back:"Back",riskRed:"REFER IMMEDIATELY",riskYellow:"MONITOR CLOSELY",riskGreen:"ROUTINE CARE",flaggedBecause:"Flagged because:",possible:"Possible concern:",nextSteps:"Recommended next step",generateReferral:"Generate referral slip",saveMonitor:"Save & set monitoring reminder",newCase:"Start another assessment",nearestFacility:"Nearest district facility",away:"away",shareSlip:"Share with family",printSlip:"Print slip",followUp:"Follow-up reminder",remindIn:"Remind me to check in",days3:"3 days",days7:"7 days",reminderSet:"Reminder set",goHome:"Done — back to home",scanNote:"Hospital staff can scan this code to pull up the full case instantly.",caseId:"Case ID",noSpeechSupport:"Voice input isn't supported in this browser — please type instead.",weekAgo:"2 days ago",qrTitle:"QR Code Generator",qrText:"Enter case information or any text below.",generateQr:"Generate QR",downloadQr:"Download QR",copyQr:"Copy content",qrEmpty:"Enter some text to generate a QR code.",disclaimer:"This tool assists your judgment. It does not diagnose or replace a doctor.",referralSlip:"Referral Slip",childLabel:"Child",symptomsRecorded:"Symptoms recorded",noRecords:"No assessments yet",tapForDetails:"Tap a case to see full details",micDenied:"Microphone permission denied — allow mic access in your browser/site settings and try again.",micNoSpeech:"No speech detected — try again, closer to the mic.",micNetwork:"Voice recognition needs an internet connection.",micNotSecure:"Voice input needs this page opened over https://",micGeneric:"Voice input failed — please type instead.",openInBrowser:"Open QR in browser",retryQr:"Retry QR",generatedOn:"Generated",loginTitle:"Secure Health Worker Login",enterName:"Full Name",enterWorkerId:"Worker / ID Number",enterPin:"Enter Passcode / PIN (Demo: 1234)",loginBtn:"Authenticate & Access",invalidPin:"Invalid passcode. Use '1234' for demo access.",missingDetails:"Please enter your Name and ID Number.",registeredPatients:"Registered Patient Records",savePatient:"Save Patient Data",aboutTitle:"About AshaCare",aboutText1:"AshaCare is a digital frontline screening and clinical decision support companion designed specifically for ASHA workers, community health providers, and rural medical officers.",aboutText2:"By evaluating symptoms against pediatric warning signs and standardized triage pathways (such as fever, pallor, and red-flag indicators), AshaCare helps bridge the gap between early symptom detection and prompt referral to district medical facilities.",aboutText3:"Built with offline resilience, multilingual support (English, Hindi, Odia), and secure worker authentication, AshaCare empowers grassroots health workers to deliver safer, faster, and more reliable pediatric care.",doctorReviewTitle:"Doctor & Health Worker Reviews",doc1Name:"Dr. Ananya Roy, MD (Pediatrics)",doc1Role:"District Chief Medical Officer",doc1Review:"Asha Care has streamlined our referral process significantly. Grassroots workers can now accurately flag high-risk symptoms and send properly structured details to our facility.",doc2Name:"Sunita Murmu",doc2Role:"Senior ASHA Supervisor",doc2Review:"The multilingual support and offline capabilities make this app extremely practical for field use. It gives our workers the confidence needed for timely interventions."},
-hi:{appName:"आशाकेयर",tagline:"बाल कैंसर चेतावनी संकेत सहायक",home:"होम",newAssessment:"नई जांच",records:"रिकॉर्ड",startAssessment:"नई जांच शुरू करें",todaysCases:"आज के मामले",pendingFollowups:"लंबित फॉलो-अप",recentAssessments:"हाल की जांचें",online:"ऑनलाइन",offline:"ऑफ़लाइन",syncNow:"अभी सिंक करें",synced:"सभी रिकॉर्ड सिंक हो गए",tapToSpeak:"लक्षण बोलने के लिए टैप करें",listening:"सुन रहा है...",orType:"... या नीचे टाइप करें",quickAdd:"सामान्य लक्षण जोड़ें",childName:"बच्चे का नाम (वैकल्पिक)",childAge:"उम्र (वर्ष)",analyze:"लक्षणों की जांच करें",analyzing:"WHO चेतावनी संकेतों से मिलान हो रहा है...",back:"वापस",riskRed:"तुरंत रेफर करें",riskYellow:"बारीकी से निगरानी करें",riskGreen:"सामान्य देखभाल",flaggedBecause:"चिन्हित करने का कारण:",possible:"संभावित चिंता:",nextSteps:"अनुशंसित अगला कदम",generateReferral:"रेफरल स्लिप बनाएं",saveMonitor:"सेव करें और निगरानी रिमाइंडर सेट करें",newCase:"एक और जांच शुरू करें",nearestFacility:"निकटतम जिला अस्पताल",away:"दूर",shareSlip:"परिवार के साथ साझा करें",printSlip:"स्लिप प्रिंट करें",followUp:"फॉलो-अप रिमाइंडर",remindIn:"मुझे जांच के लिए याद दिलाएं",days3:"3 दिन",days7:"7 दिन",reminderSet:"रिमाइंडर सेट हो गया",goHome:"पूर्ण होम पर वापस जाएं",scanNote:"अस्पताल स्टाफ इस कोड को स्कैन करके पूरा मामला तुरंत देख सकता है।",caseId:"केस आईडी",noSpeechSupport:"इस ब्राउज़र में वॉइस इनपुट समर्थित नहीं है- कृपया टाइप करें।",weekAgo:"2 दिन पहले",qrTitle:"QR कोड जनरेटर",qrText:"नीचे केस की जानकारी या कोई भी टेक्स्ट लिखें।",generateQr:"QR बनाएं",downloadQr:"QR डाउनलोड करें",copyQr:"टेक्स्ट कॉपी करें",qrEmpty:"QR बनाने के लिए टेक्स्ट लिखें।",disclaimer:"यह टूल आपकी सहायता करता है। यह निदान नहीं करता या डॉक्टर का विकल्प नहीं है।",referralSlip:"रेफरल स्लिप",childLabel:"बच्चा",symptomsRecorded:"दर्ज लक्षण",noRecords:"अभी तक कोई जांच नहीं",tapForDetails:"पूरी जानकारी देखने के लिए केस पर टैप करें",micDenied:"माइक्रोफ़ोन अनुमति अस्वीकृत",micNoSpeech:"कोई आवाज़ नहीं मिली — माइक के पास फिर से बोलें।",micNetwork:"वॉइस पहचान के लिए इंटरनेट चाहिए।",micNotSecure:"वॉइस इनपुट के लिए सुरक्षित कनेक्शन चाहिए।",micGeneric:"वॉइस इनपुट विफल — कृपया टाइप करें।",openInBrowser:"ब्राउज़र में QR खोलें",retryQr:"QR फिर कोशिश करें",generatedOn:"जनरेट किया गया",loginTitle:"सुरक्षित स्वास्थ्य कार्यकर्ता लॉगिन",enterName:"पूरा नाम",enterWorkerId:"कार्यकर्ता / आईडी नंबर",enterPin:"पासकोड / पिन दर्ज करें (डेमो: 1234)",loginBtn:"प्रमाणीकृत करें और एक्सेस करें",invalidPin:"अमान्य पासकोड। डेमो के लिए '1234' का उपयोग करें।",missingDetails:"कृपया अपना नाम और आईडी नंबर दर्ज करें।",registeredPatients:"पंजीकृत मरीज रिकॉर्ड",savePatient:"मरीज का डेटा सहेजें",aboutTitle:"आशाकेयर के बारे में",aboutText1:"आशाकेयर एक डिजिटल फ्रंटलाइन स्क्रीनिंग टूल है...",aboutText2:"यह लक्षणों का मूल्यांकन करता है...",aboutText3:"यह सुरक्षित और बहुभाषी है...",doctorReviewTitle:"समीक्षाएं",doc1Name:"डॉ. अनन्या रॉय",doc1Role:"मुख्य चिकित्सा अधिकारी",doc1Review:"आशाकेयर ने हमारी प्रक्रिया को सुव्यवस्थित किया है।",doc2Name:"सुनीता मुर्मू",doc2Role:"वरिष्ठ आशा पर्यवेक्षक",doc2Review:"यह ऐप फील्ड के लिए बहुत व्यावहारिक है।"}
+en:{appName:"AshaCare",tagline:"Pediatric red-flag triage assistant",home:"Home",newAssessment:"New Assessment",records:"Records",startAssessment:"Start New Assessment",todaysCases:"Today's cases",pendingFollowups:"Pending follow-ups",recentAssessments:"Recent assessments",online:"Online",offline:"Offline",syncNow:"Sync now",synced:"All records synced",tapToSpeak:"Tap to speak symptoms",listening:"Listening…",orType:"…or type / edit below",quickAdd:"Quick-add common signs",childName:"Child's name (optional)",childAge:"Age (years)",analyze:"Analyze symptoms",analyzing:"Checking against WHO warning signs…",back:"Back",riskRed:"REFER IMMEDIATELY",riskYellow:"MONITOR CLOSELY",riskGreen:"ROUTINE CARE",flaggedBecause:"Flagged because:",possible:"Possible concern:",nextSteps:"Recommended next step",generateReferral:"Generate referral slip",saveMonitor:"Save & set monitoring reminder",newCase:"Start another assessment",nearestFacility:"Nearest district facility",away:"away",shareSlip:"Share with family",printSlip:"Print slip",followUp:"Follow-up reminder",remindIn:"Remind me to check in",days3:"3 days",days7:"7 days",reminderSet:"Reminder set",goHome:"Done — back to home",scanNote:"Hospital staff can scan this code to pull up the full case instantly.",caseId:"Case ID",noSpeechSupport:"Voice input isn't supported in this browser — please type instead.",weekAgo:"2 days ago",qrTitle:"QR Code Generator",qrText:"Enter case information or any text below.",generateQr:"Generate QR",downloadQr:"Download QR",copyQr:"Copy content",qrEmpty:"Enter some text to generate a QR code.",disclaimer:"This tool assists your judgment. It does not diagnose or replace a doctor.",referralSlip:"Referral Slip",childLabel:"Child",symptomsRecorded:"Symptoms recorded",noRecords:"No assessments yet",tapForDetails:"Tap a case to see full details",micDenied:"Microphone permission denied — allow mic access in your browser/site settings and try again.",micNoSpeech:"No speech detected — try again, closer to the mic.",micNetwork:"Voice recognition needs an internet connection.",micNotSecure:"Voice input needs this page opened over https://",micGeneric:"Voice input failed — please type instead.",openInBrowser:"Open QR in browser",retryQr:"Retry QR",generatedOn:"Generated",loginTitle:"Secure Health Worker Login",enterName:"Full Name",enterWorkerId:"Worker / ID Number",enterPin:"Enter Passcode / PIN (Demo: 1234)",loginBtn:"Authenticate & Access",invalidPin:"Invalid passcode. Use '1234' for demo access.",missingDetails:"Please enter your Name and ID Number.",registeredPatients:"Registered Patient Records",savePatient:"Save Patient Data",aboutTitle:"About AshaCare",aboutText1:"AshaCare is a digital frontline screening and clinical decision support companion designed specifically for ASHA workers, community health providers, and rural medical officers.",aboutText2:"By evaluating symptoms against pediatric warning signs and standardized triage pathways (such as fever, pallor, and red-flag indicators), AshaCare helps bridge the gap between early symptom detection and prompt referral to district medical facilities.",aboutText3:"Built with offline resilience, multilingual support, and secure worker authentication, AshaCare empowers grassroots health workers to deliver safer, faster, and more reliable pediatric care.",doctorReviewTitle:"Doctor & Health Worker Reviews",doc1Name:"Dr. Ananya Roy, MD (Pediatrics)",doc1Role:"District Chief Medical Officer",doc1Review:"Asha Care has streamlined our referral process significantly. Grassroots workers can now accurately flag high-risk symptoms and send properly structured details to our facility.",doc2Name:"Sunita Murmu",doc2Role:"Senior ASHA Supervisor",doc2Review:"The multilingual support and offline capabilities make this app extremely practical for field use. It gives our workers the confidence needed for timely interventions."},
+hi:{appName:"आशाकेयर",tagline:"बाल कैंसर चेतावनी संकेत सहायक",home:"होम",newAssessment:"नई जांच",records:"रिकॉर्ड",startAssessment:"नई जांच शुरू करें",todaysCases:"आज के मामले",pendingFollowups:"लंबित फॉलो-अप",recentAssessments:"हाल की जांचें",online:"ऑनलाइन",offline:"ऑफ़लाइन",syncNow:"अभी सिंक करें",synced:"सभी रिकॉर्ड सिंक हो गए",tapToSpeak:"लक्षण बोलने के लिए टैप करें",listening:"सुन रहा है...",orType:"... या नीचे टाइप करें",quickAdd:"सामान्य लक्षण जोड़ें",childName:"बच्चे का नाम (वैकल्पिक)",childAge:"उम्र (वर्ष)",analyze:"लक्षणों की जांच करें",analyzing:"WHO चेतावनी संकेतों से मिलान हो रहा है...",back:"वापस",riskRed:"तुरंत रेफर करें",riskYellow:"बारीकी से निगरानी करें",riskGreen:"सामान्य देखभाल",flaggedBecause:"चिन्हित करने का कारण:",possible:"संभावित चिंता:",nextSteps:"अनुशंसित अगला कदम",generateReferral:"रेफरल स्लिप बनाएं",saveMonitor:"सेव करें और निगरानी रिमाइंडर सेट करें",newCase:"एक और जांच शुरू करें",nearestFacility:"निकटतम जिला अस्पताल",away:"दूर",shareSlip:"परिवार के साथ साझा करें",printSlip:"स्लिप प्रिंट करें",followUp:"फॉलो-अप रिमाइंडर",remindIn:"मुझे जांच के लिए याद दिलाएं",days3:"3 दिन",days7:"7 दिन",reminderSet:"रिमाइंडर सेट हो गया",goHome:"पूर्ण होम पर वापस जाएं",scanNote:"अस्पताल स्टाफ इस कोड को स्कैन करके पूरा मामला तुरंत देख सकता है।",caseId:"केस आईडी",noSpeechSupport:"इस ब्राउज़र में वॉइस इनपुट समर्थित नहीं है- कृपया टाइप करें।",weekAgo:"2 दिन पहले",qrTitle:"QR कोड जनरेटर",qrText:"नीचे केस की जानकारी या कोई भी टेक्स्ट लिखें।",generateQr:"QR बनाएं",downloadQr:"QR डाउनलोड करें",copyQr:"टेक्स्ट कॉपी करें",qrEmpty:"QR बनाने के लिए टेक्स्ट लिखें।",disclaimer:"यह टूल आपकी सहायता करता है। यह निदान नहीं करता या डॉक्टर का विकल्प नहीं है।",referralSlip:"रेफरल स्लिप",childLabel:"बच्चा",symptomsRecorded:"दर्ज लक्षण",noRecords:"अभी तक कोई जांच नहीं",tapForDetails:"पूरी जानकारी देखने के लिए केस पर टैप करें",micDenied:"माइक्रोफ़ोन अनुमति अस्वीकृत",micNoSpeech:"कोई आवाज़ नहीं मिली — माइक के पास फिर से बोलें।",micNetwork:"वॉइस पहचान के लिए इंटरनेट चाहिए।",micNotSecure:"वॉइस इनपुट के लिए सुरक्षित कनेक्शन चाहिए।",micGeneric:"वॉइस इनपुट विफल — कृपया टाइप करें।",openInBrowser:"ब्राउज़र में QR खोलें",retryQr:"QR फिर कोशिश करें",generatedOn:"जनरेट किया गया",loginTitle:"सुरक्षित स्वास्थ्य कार्यकर्ता लॉगिन",enterName:"पूरा नाम",enterWorkerId:"कार्यकर्ता / आईडी नंबर",enterPin:"पासकोड / पिन दर्ज करें (डेमो: 1234)",loginBtn:"प्रमाणीकृत करें और एक्सेस करें",invalidPin:"अमान्य पासकोड। डेमो के लिए '1234' का उपयोग करें।",missingDetails:"कृपया अपना नाम और आईडी नंबर दर्ज करें।",registeredPatients:"पंजीकृत मरीज रिकॉर्ड",savePatient:"मरीज का डेटा सहेजें",aboutTitle:"आशाकेयर के बारे में",aboutText1:"आशाकेयर एक डिजिटल फ्रंटलाइन स्क्रीनिंग टूल है...",aboutText2:"यह लक्षणों का मूल्यांकन करता है...",aboutText3:"यह सुरक्षित और बहुभाषी है...",doctorReviewTitle:"समीक्षाएं",doc1Name:"डॉ. अनन्या रॉय",doc1Role:"मुख्य चिकित्सा अधिकारी",doc1Review:"आशाकेयर ने हमारी प्रक्रिया को सुव्यवस्थित किया है।",doc2Name:"सुनीता मुर्मू",doc2Role:"वरिष्ठ आशा पर्यवेक्षक",doc2Review:"यह ऐप फील्ड के लिए बहुत व्यावहारिक है।"},
+or:{appName:"ଆଶାକେୟାର",tagline:"ଶିଶୁ ବିପଦ ସଙ୍କେତ ସହାୟକ",home:"ମୂଳ ପୃଷ୍ଠା",newAssessment:"ନୂତନ ଯାଞ୍ଚ",records:"ରେକର୍ଡ",startAssessment:"ନୂତନ ଯାଞ୍ଚ ଆରମ୍ଭ କରନ୍ତୁ",todaysCases:"ଆଜିର କେସ୍",pendingFollowups:"ବାକିଥିବା ଫଲୋ-ଅପ୍",recentAssessments:"ସାମ୍ପ୍ରତିକ ଯାଞ୍ଚ",online:"ଅନ୍‌ଲାଇନ୍",offline:"ଅଫ୍‌ଲାଇନ୍",syncNow:"ବର୍ତ୍ତମାନ ସିଙ୍କ୍ କରନ୍ତୁ",synced:"ସମସ୍ତ ରେକର୍ଡ ସିଙ୍କ୍ ହୋଇଛି",tapToSpeak:"ଲକ୍ଷଣ କହିବା ପାଇଁ ଟ୍ୟାପ୍ କରନ୍ତୁ",listening:"ଶୁଣୁଛି...",orType:"...କିମ୍ବା ତଳେ ଟାଇପ୍ କରନ୍ତୁ",quickAdd:"ସାଧାରଣ ଲକ୍ଷଣ ଯୋଡନ୍ତୁ",childName:"ପିଲାର ନାମ (ଇଚ୍ଛାଧୀନ)",childAge:"ବୟସ (ବର୍ଷ)",analyze:"ଲକ୍ଷଣ ଯାଞ୍ଚ କରନ୍ତୁ",analyzing:"WHO ବିପଦ ସଙ୍କେତ ସହିତ ମେଳ କରାଯାଉଛି...",back:"ପଛକୁ",riskRed:"ତୁରନ୍ତ ରେଫର୍ କରନ୍ତୁ",riskYellow:"ଭଲଭାବେ ନିରୀକ୍ଷଣ କରନ୍ତୁ",riskGreen:"ସାଧାରଣ ଯତ୍ନ",flaggedBecause:"ଚିହ୍ନଟ କରିବାର କାରଣ:",possible:"ସମ୍ଭାବ୍ୟ ବିପଦ:",nextSteps:"ପରବର୍ତ୍ତୀ ପଦକ୍ଷେପ",generateReferral:"ରେଫରାଲ୍ ସ୍ଲିପ୍ ପ୍ରସ୍ତୁତ କରନ୍ତୁ",saveMonitor:"ସେଭ୍ କରନ୍ତୁ ଏବଂ ରିମାଇଣ୍ଡର ସେଟ୍ କରନ୍ତୁ",newCase:"ଅନ୍ୟ ଏକ ଯାଞ୍ଚ ଆରମ୍ଭ କରନ୍ତୁ",nearestFacility:"ନିକଟବର୍ତ୍ତୀ ଜିଲ୍ଲା ଚିକିତ୍ସାଳୟ",away:"ଦୂର",shareSlip:"ପରିବାର ସହିତ ସେୟାର କରନ୍ତୁ",printSlip:"ସ୍ଲିପ୍ ପ୍ରିଣ୍ଟ କରନ୍ତୁ",followUp:"ଫଲୋ-ଅପ୍ ରିମାଇଣ୍ଡର",remindIn:"ମୋତେ ମନେ ପକାଇଦିଅନ୍ତୁ",days3:"୩ ଦିନ",days7:"୭ ଦିନ",reminderSet:"ରିମାଇଣ୍ଡର ସେଟ୍ ହେଲା",goHome:"ସମ୍ପୂର୍ଣ୍ଣ — ମୂଳ ପୃଷ୍ଠାକୁ ଫେରନ୍ତୁ",scanNote:"ଡାକ୍ତରଖାନା କର୍ମଚାରୀମାନେ ସମ୍ପୂର୍ଣ୍ଣ ବିବରଣୀ ପାଇଁ ଏହି କୋଡ୍ ସ୍କାନ୍ କରିପାରିବେ।",caseId:"କେସ୍ ଆଇଡି",noSpeechSupport:"ଏହି ବ୍ରାଉଜର୍‌ରେ ଭଏସ୍ ଇନପୁଟ୍ ସମର୍ଥିତ ନୁହେଁ - ଦୟାକରି ଟାଇପ୍ କରନ୍ତୁ।",weekAgo:"୨ ଦିନ ପୂର୍ବରୁ",qrTitle:"QR କୋଡ୍ ଜେନେରେଟର୍",qrText:"ତଳେ କେସ୍ ସୂଚନା କିମ୍ବା କୌଣସି ଟେକ୍ସଟ୍ ଲେଖନ୍ତୁ।",generateQr:"QR ତିଆରି କରନ୍ତୁ",downloadQr:"QR ଡାଉନଲୋଡ୍ କରନ୍ତୁ",copyQr:"ଟେକ୍ସଟ୍ କପି କରନ୍ତୁ",qrEmpty:"QR ତିଆରି କରିବା ପାଇଁ ଟେକ୍ସଟ୍ ଲେଖନ୍ତୁ।",disclaimer:"ଏହି ଟୁଲ୍ ଆପଣଙ୍କୁ ସାହାଯ୍ୟ କରିବା ପାଇଁ ଉଦ୍ଦିଷ୍ଟ। ଏହା କୌଣସି ରୋଗର ନିର୍ଣ୍ଣୟ କରେ ନାହିଁ କିମ୍ବା ଡାକ୍ତରଙ୍କ ବିକଳ୍ପ ନୁହେଁ।",referralSlip:"ରେଫରାଲ୍ ସ୍ଲିପ୍",childLabel:"ଶିଶୁ",symptomsRecorded:"ରେକର୍ଡ ହୋଇଥିବା ଲକ୍ଷଣ",noRecords:"ଏପର୍ଯ୍ୟନ୍ତ କୌଣସି ଯାଞ୍ଚ ହୋଇନାହିଁ",tapForDetails:"ପୂରା ବିବରଣୀ ପାଇଁ କେସ୍ ଉପରେ ଟ୍ୟାପ୍ କରନ୍ତୁ",micDenied:"ମାଇକ୍ରୋଫୋନ୍ ଅନୁମତି ନାହିଁ",micNoSpeech:"କୌଣସି ଶବ୍ଦ ଶୁଭିଲା ନାହିଁ - ମାଇକ୍ ପାଖରେ ପୁଣି ଚେଷ୍ଟା କରନ୍ତୁ।",micNetwork:"ଭଏସ୍ ଚିହ୍ନିବା ପାଇଁ ଇଣ୍ଟରନେଟ୍ ଦରକାର।",micNotSecure:"ଭଏସ୍ ଇନପୁଟ୍ ପାଇଁ ସୁରକ୍ଷିତ ସଂଯୋଗ ଦରକାର।",micGeneric:"ଭଏସ୍ ଇନପୁଟ୍ ବିଫଳ - ଦୟାକରି ଟାଇପ୍ କରନ୍ତୁ।",openInBrowser:"ବ୍ରାଉଜର୍‌ରେ QR ଖୋଲନ୍ତୁ",retryQr:"QR ପୁଣି ଚେଷ୍ଟା କରନ୍ତୁ",generatedOn:"ପ୍ରସ୍ତୁତ କରାଯାଇଛି",loginTitle:"ସୁରକ୍ଷିତ ସ୍ୱାସ୍ଥ୍ୟ କର୍ମୀ ଲଗଇନ୍",enterName:"ପୂରା ନାମ",enterWorkerId:"କର୍ମୀ / ଆଇଡି ନମ୍ବର",enterPin:"ପାସକୋଡ୍ / ପିନ୍ ଦିଅନ୍ତୁ (ଡେମୋ: 1234)",loginBtn:"ଲଗଇନ୍ କରନ୍ତୁ",invalidPin:"ଅମାନ୍ୟ ପାସକୋଡ୍। ଡେମୋ ପାଇଁ '1234' ବ୍ୟବହାର କରନ୍ତୁ।",missingDetails:"ଦୟାକରି ଆପଣଙ୍କର ନାମ ଏବଂ ଆଇଡି ନମ୍ବର ଦିଅନ୍ତୁ।",registeredPatients:"ପଞ୍ଜିକୃତ ରୋଗୀ ରେକର୍ଡ",savePatient:"ରୋଗୀର ତଥ୍ୟ ସେଭ୍ କରନ୍ତୁ",aboutTitle:"ଆଶାକେୟାର ବିଷୟରେ",aboutText1:"ଆଶାକେୟାର ହେଉଛି ଆଶା କର୍ମୀ ଏବଂ ସ୍ୱାସ୍ଥ୍ୟ ପ୍ରଦାନକାରୀଙ୍କ ପାଇଁ ଏକ ଡିଜିଟାଲ୍ ସ୍କ୍ରିନିଂ ଟୁଲ୍।",aboutText2:"ଏହା ପିଲାମାନଙ୍କର ଲକ୍ଷଣଗୁଡ଼ିକୁ ବିପଦ ସଙ୍କେତ ସହିତ ମୂଲ୍ୟାଙ୍କନ କରିବାରେ ସାହାଯ୍ୟ କରେ।",aboutText3:"ଅଫ୍‌ଲାଇନ୍ ସୁବିଧା ଏବଂ ବହୁଭାଷୀ ସମର୍ଥନ ସହିତ, ଏହା ସ୍ୱାସ୍ଥ୍ୟ କର୍ମୀମାନଙ୍କୁ ଶୀଘ୍ର ଏବଂ ସୁରକ୍ଷିତ ସେବା ପ୍ରଦାନ କରିବାକୁ ସକ୍ଷମ କରେ।",doctorReviewTitle:"ସମୀକ୍ଷା",doc1Name:"ଡକ୍ଟର ଅନନ୍ୟା ରୟ",doc1Role:"ମୁଖ୍ୟ ଚିକିତ୍ସା ଅଧିକାରୀ",doc1Review:"ଆଶାକେୟାର ଆମର ରେଫରାଲ୍ ପ୍ରକ୍ରିୟାକୁ ବହୁତ ସହଜ କରିଛି।",doc2Name:"ସୁନୀତା ମୁର୍ମୁ",doc2Role:"ବରିଷ୍ଠ ଆଶା ସୁପରଭାଇଜର୍",doc2Review:"ଅଫ୍‌ଲାଇନ୍ ଏବଂ ବହୁଭାଷୀ ସୁବିଧା ଯୋଗୁଁ ଏହା ଫିଲ୍ଡରେ ବ୍ୟବହାର ପାଇଁ ଅତ୍ୟନ୍ତ ସୁବିଧାଜନକ।"}
 };
 
 const QUICK = [
-  { id:"fever", label: { en:"Fever > 7 days", hi:"7 दिन से अधिक बुखार"} },
-  { id:"pallor", label: { en:"Severe Pallor", hi:"गंभीर पीलापन"} },
-  { id:"bleeding", label: { en:"Unusual Bleeding", hi:"असामान्य रक्तस्राव"} },
-  { id:"mass", label: { en:"Lump/Swelling", hi:"गांठ/सूजन"} },
-  { id:"white_eye", label: { en:"White Pupil", hi:"सफेद पुतली"} },
-  { id:"pain", label: { en:"Bone/Joint Pain", hi:"हड्डी/जोड़ों का दर्द"} },
-  { id:"cough", label: { en:"Cough", hi:"खांसी"} },
-  { id:"diarrhea", label: { en:"Diarrhea", hi:"दस्त"} }
+  { id:"fever", label: { en:"Fever > 7 days", hi:"7 दिन से अधिक बुखार", or:"୭ ଦିନରୁ ଅଧିକ ଜ୍ୱର"} },
+  { id:"pallor", label: { en:"Severe Pallor", hi:"गंभीर पीलापन", or:"ଅତ୍ୟଧିକ ଫିକାପଣ"} },
+  { id:"bleeding", label: { en:"Unusual Bleeding", hi:"असामान्य रक्तस्राव", or:"ଅସ୍ୱାଭାବିକ ରକ୍ତସ୍ରାବ"} },
+  { id:"mass", label: { en:"Lump/Swelling", hi:"गांठ/सूजन", or:"ଫୁଲା / ଗୋଟା"} },
+  { id:"white_eye", label: { en:"White Pupil", hi:"सफेद पुतली", or:"ଧଳା ଆଖିଡୋଳା"} },
+  { id:"pain", label: { en:"Bone/Joint Pain", hi:"हड्डी/जोड़ों का दर्द", or:"ହାଡ/ଗଣ୍ଠି ବିନ୍ଧା"} },
+  { id:"cough", label: { en:"Cough", hi:"खांसी", or:"କାଶ"} },
+  { id:"diarrhea", label: { en:"Diarrhea", hi:"दस्त", or:"ଝାଡା"} }
 ];
 
 const App = {
@@ -240,7 +236,6 @@ const App = {
         this.logout();
       }
     } catch(e) {
-      // Offline mode fallback could go here
       this.logout();
     }
   },
@@ -306,9 +301,14 @@ const App = {
   },
 
   toggleLang() {
-    this.lang = this.lang === 'en' ? 'hi' : 'en';
-    document.getElementById('langBtn').innerText = this.lang === 'en' ? 'A/अ' : 'अ/A';
-    // Re-render current view if possible
+    const langs = ['en', 'hi', 'or'];
+    const labels = { 'en': 'A/अ/ଅ', 'hi': 'अ/ଅ/A', 'or': 'ଅ/A/अ' };
+    
+    let currentIdx = langs.indexOf(this.lang);
+    this.lang = langs[(currentIdx + 1) % langs.length];
+    
+    document.getElementById('langBtn').innerText = labels[this.lang];
+    
     if(!this.user) this.renderLogin();
     else if(this.currentScreen) this.go(this.currentScreen);
   },
@@ -520,7 +520,10 @@ const App = {
     if(document.getElementById('micBtn').classList.contains('listening')) {
       this.recognition.stop();
     } else {
-      this.recognition.lang = this.lang === 'hi' ? 'hi-IN' : 'en-IN';
+      let langCode = 'en-IN';
+      if(this.lang === 'hi') langCode = 'hi-IN';
+      if(this.lang === 'or') langCode = 'or-IN';
+      this.recognition.lang = langCode;
       this.recognition.start();
     }
   },
@@ -535,11 +538,10 @@ const App = {
 
     scr.innerHTML = \`<div class="loader"><div class="spinner"></div><div>\${this.t('analyzing')}</div></div>\`;
 
-    // Simple Rule-based Triage (Simulating backend AI/logic)
     const triage = (txt, set) => {
         const txtLower = txt.toLowerCase();
-        const redList = ['fever', 'pallor', 'bleeding', 'mass', 'white_eye', 'pain', 'severe', 'white pupil', 'रक्त', 'खून'];
-        const yellowList = ['cough', 'diarrhea', 'खांसी', 'दस्त'];
+        const redList = ['fever', 'pallor', 'bleeding', 'mass', 'white_eye', 'pain', 'severe', 'white pupil', 'रक्त', 'खून', 'ଜ୍ୱର', 'ରକ୍ତସ୍ରାବ', 'ଫିକାପଣ'];
+        const yellowList = ['cough', 'diarrhea', 'खांसी', 'दस्त', 'କାଶ', 'ଝାଡା'];
         let hasRed = false, hasYellow = false, reasons = [];
 
         redList.forEach(k => { if(set.has(k) || txtLower.includes(k.replace('_',' '))) { hasRed=true; reasons.push("Red flag: "+k); } });
