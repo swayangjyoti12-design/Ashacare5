@@ -1,15 +1,28 @@
+
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+const JWT_SECRET = process.env.JWT_SECRET || 'ashacare_secure_jwt_secret_key_2026';
+
 // ==========================================
-// 1. MONGODB DATABASE SETUP & SCHEMA
+// 1. MONGODB DATABASE SCHEMAS
 // ==========================================
+const userSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  password: { type: String, required: true },
+  role: { type: String, enum: ['asha', 'doctor'], required: true },
+  createdAt: { type: Date, default: Date.now }
+});
+
 const caseSchema = new mongoose.Schema({
   caseId: { type: String, required: true, unique: true },
   name: { type: String, required: true },
@@ -20,9 +33,11 @@ const caseSchema = new mongoose.Schema({
   date: { type: Date, default: Date.now },
   status: { type: String, default: 'Pending Review' },
   doctorNotes: { type: String, default: '' },
-  followUp: { type: Boolean, default: false }
+  followUp: { type: Boolean, default: false },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
 });
 
+const User = mongoose.model('User', userSchema);
 const Case = mongoose.model('Case', caseSchema);
 
 // Connect to MongoDB
@@ -32,31 +47,101 @@ mongoose.connect(MONGO_URI)
   .catch(err => console.error("MongoDB connection error:", err));
 
 // ==========================================
-// 2. API ENDPOINTS
+// 2. AUTHENTICATION MIDDLEWARE
 // ==========================================
-// Fetch all cases (Doctor Dashboard)
-app.get('/api/cases', async (req, res) => {
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Access denied. Please log in.' });
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ error: 'Session expired or invalid. Log in again.' });
+    req.user = user;
+    next();
+  });
+};
+
+// ==========================================
+// 3. API ENDPOINTS
+// ==========================================
+
+// Register User
+app.post('/api/auth/register', async (req, res) => {
   try {
-    const cases = await Case.find().sort({ date: -1 }); // Newest first
-    res.json(cases);
+    const { name, email, password, role } = req.body;
+    if (!name || !email || !password || !role) {
+      return res.status(400).json({ error: 'All fields are required.' });
+    }
+
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ error: 'Email is already registered.' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = new User({ name, email, password: hashedPassword, role });
+    await user.save();
+
+    const token = jwt.sign({ userId: user._id, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '7d' });
+    res.status(201).json({ token, user: { id: user._id, name: user.name, email: user.email, role: user.role } });
   } catch (err) {
-    res.status(500).json({ error: "Failed to fetch cases" });
+    res.status(500).json({ error: 'Registration failed server-side.' });
   }
 });
 
-// Create a new case (ASHA Worker)
-app.post('/api/cases', async (req, res) => {
+// Login User
+app.post('/api/auth/login', async (req, res) => {
   try {
-    const newCase = new Case(req.body);
+    const { email, password } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) return res.status(400).json({ error: 'Invalid email or password.' });
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) return res.status(400).json({ error: 'Invalid email or password.' });
+
+    const token = jwt.sign({ userId: user._id, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, user: { id: user._id, name: user.name, email: user.email, role: user.role } });
+  } catch (err) {
+    res.status(500).json({ error: 'Login failed server-side.' });
+  }
+});
+
+// Get Current User Session
+app.get('/api/auth/me', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId).select('-password');
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch user session.' });
+  }
+});
+
+// Fetch all cases across devices
+app.get('/api/cases', authenticateToken, async (req, res) => {
+  try {
+    const cases = await Case.find().populate('createdBy', 'name email').sort({ date: -1 });
+    res.json(cases);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch cases.' });
+  }
+});
+
+// Create a new case
+app.post('/api/cases', authenticateToken, async (req, res) => {
+  try {
+    const newCase = new Case({
+      ...req.body,
+      createdBy: req.user.userId
+    });
     const savedCase = await newCase.save();
     res.status(201).json(savedCase);
   } catch (err) {
-    res.status(500).json({ error: "Failed to save case" });
+    res.status(500).json({ error: 'Failed to save case.' });
   }
 });
 
-// Update a case (Doctor Exam)
-app.put('/api/cases/:caseId', async (req, res) => {
+// Update a case (Doctor Notes & Status)
+app.put('/api/cases/:caseId', authenticateToken, async (req, res) => {
   try {
     const updatedCase = await Case.findOneAndUpdate(
       { caseId: req.params.caseId },
@@ -65,12 +150,12 @@ app.put('/api/cases/:caseId', async (req, res) => {
     );
     res.json(updatedCase);
   } catch (err) {
-    res.status(500).json({ error: "Failed to update case" });
+    res.status(500).json({ error: 'Failed to update case.' });
   }
 });
 
 // ==========================================
-// 3. EMBEDDED FRONTEND UI
+// 4. EMBEDDED FRONTEND UI
 // ==========================================
 const frontendHTML = `
 <!DOCTYPE html>
@@ -85,7 +170,7 @@ const frontendHTML = `
 </head>
 <body class="bg-slate-50 text-slate-800 font-sans min-h-screen flex flex-col">
 
-  <header class="bg-teal-700 text-white shadow-md sticky top-0 z-50">
+  <header class="bg-teal-700 text-white shadow-md sticky top-0 z-40">
     <div class="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-4">
       <div class="flex items-center space-x-2">
         <i data-lucide="activity" class="w-8 h-8 text-amber-300"></i>
@@ -109,6 +194,12 @@ const frontendHTML = `
           </button>
           <button id="btnDoctorRole" onclick="switchRole('doctor')" class="px-3 py-1 rounded-md text-xs font-semibold transition-colors text-teal-100 hover:text-white">
             Doctor / MO
+          </button>
+        </div>
+        <div id="userProfile" class="hidden items-center gap-2 pl-2 border-l border-teal-600">
+          <span id="userNameDisplay" class="text-xs font-semibold text-amber-200"></span>
+          <button onclick="logout()" title="Logout" class="p-1 hover:bg-teal-800 rounded text-teal-200 hover:text-white">
+            <i data-lucide="log-out" class="w-4 h-4"></i>
           </button>
         </div>
       </div>
@@ -217,6 +308,7 @@ const frontendHTML = `
                 <th class="p-3">Patient</th>
                 <th class="p-3">Risk Tier</th>
                 <th class="p-3">Symptoms</th>
+                <th class="p-3">Logged By</th>
                 <th class="p-3">Status</th>
                 <th class="p-3">Action</th>
               </tr>
@@ -228,7 +320,53 @@ const frontendHTML = `
     </div>
   </main>
 
-  <!-- Doctor Exam Modal -->
+  <!-- AUTH MODAL -->
+  <div id="authModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-xl shadow-2xl max-w-md w-full p-6 space-y-4">
+      <div class="text-center border-b pb-3">
+        <div class="flex justify-center mb-1">
+          <i data-lucide="activity" class="w-10 h-10 text-teal-600"></i>
+        </div>
+        <h3 class="text-xl font-bold text-slate-800" id="authTitle">Welcome to AshaCare</h3>
+        <p class="text-xs text-slate-500">Log in or create an account to sync clinical records</p>
+      </div>
+
+      <div id="authError" class="hidden text-xs bg-red-50 text-red-700 p-2.5 rounded border border-red-200 font-medium"></div>
+
+      <form id="authForm" onsubmit="handleAuthSubmit(event)" class="space-y-3">
+        <div id="nameField" class="hidden">
+          <label class="block text-xs font-semibold text-slate-600 mb-1">Full Name</label>
+          <input type="text" id="authName" class="w-full border border-slate-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none" placeholder="e.g. Dr. Ananya Das">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-600 mb-1">Email Address</label>
+          <input type="email" id="authEmail" required class="w-full border border-slate-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none" placeholder="name@health.gov.in">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-600 mb-1">Password</label>
+          <input type="password" id="authPassword" required class="w-full border border-slate-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none" placeholder="••••••••">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-600 mb-1">Role</label>
+          <select id="authRole" class="w-full border border-slate-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none">
+            <option value="asha">ASHA Worker / Field Screener</option>
+            <option value="doctor">Medical Officer / Doctor</option>
+          </select>
+        </div>
+        <button type="submit" id="authSubmitBtn" class="w-full bg-teal-700 hover:bg-teal-800 text-white font-semibold py-2.5 rounded-lg text-sm transition-colors shadow">
+          Log In
+        </button>
+      </form>
+
+      <div class="text-center border-t pt-3">
+        <button id="toggleAuthModeBtn" onclick="toggleAuthMode()" class="text-xs text-teal-700 hover:text-teal-900 font-semibold underline">
+          Need an account? Register here
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- DOCTOR EXAM MODAL -->
   <div id="examModal" class="hidden fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
     <div class="bg-white rounded-xl shadow-xl max-w-lg w-full p-6 space-y-4">
       <div class="flex justify-between items-center border-b pb-2">
@@ -260,6 +398,8 @@ const frontendHTML = `
     let isListening = false;
     let activeExamCaseId = null;
     let cachedCases = [];
+    let isRegisterMode = false;
+    let currentUser = null;
 
     const RED_FLAG_KEYWORDS = ['fever', 'white pupil', 'leukocoria', 'pallor', 'mass', 'swelling', 'bleeding', 'petechiae', 'weight loss', 'pain', 'vomiting', 'lump', 'बुखार', 'सफेद', 'खून', 'दर्द', 'ଓଜନ', 'ରକ୍ତ', 'ଜ୍ଵର'];
     const YELLOW_FLAG_KEYWORDS = ['cough', 'cold', 'diarrhea', 'rash', 'fatigue', 'खांसी', 'दस्त', 'काଶ', 'ଝାଡା'];
@@ -267,7 +407,112 @@ const frontendHTML = `
     document.addEventListener('DOMContentLoaded', () => {
       lucide.createIcons();
       initSpeechRecognition();
+      checkSession();
     });
+
+    // Session Management
+    function getAuthToken() { return localStorage.getItem('ashacare_token'); }
+
+    async function checkSession() {
+      const token = getAuthToken();
+      if (!token) return showAuthModal();
+
+      try {
+        const res = await fetch('/api/auth/me', {
+          headers: { 'Authorization': 'Bearer ' + token }
+        });
+        if (res.ok) {
+          currentUser = await res.json();
+          hideAuthModal();
+          updateUserUI();
+        } else {
+          logout();
+        }
+      } catch (err) {
+        showAuthModal();
+      }
+    }
+
+    function showAuthModal() {
+      document.getElementById('authModal').classList.remove('hidden');
+    }
+
+    function hideAuthModal() {
+      document.getElementById('authModal').classList.add('hidden');
+    }
+
+    function updateUserUI() {
+      if (!currentUser) return;
+      document.getElementById('userProfile').classList.remove('hidden');
+      document.getElementById('userProfile').classList.add('flex');
+      document.getElementById('userNameDisplay').innerText = currentUser.name + " (" + currentUser.role.toUpperCase() + ")";
+      switchRole(currentUser.role);
+    }
+
+    function logout() {
+      localStorage.removeItem('ashacare_token');
+      currentUser = null;
+      document.getElementById('userProfile').classList.add('hidden');
+      document.getElementById('userProfile').classList.remove('flex');
+      showAuthModal();
+    }
+
+    function toggleAuthMode() {
+      isRegisterMode = !isRegisterMode;
+      const title = document.getElementById('authTitle');
+      const submitBtn = document.getElementById('authSubmitBtn');
+      const toggleBtn = document.getElementById('toggleAuthModeBtn');
+      const nameField = document.getElementById('nameField');
+
+      if (isRegisterMode) {
+        title.innerText = "Create AshaCare Account";
+        submitBtn.innerText = "Register";
+        toggleBtn.innerText = "Already have an account? Log in";
+        nameField.classList.remove('hidden');
+      } else {
+        title.innerText = "Welcome to AshaCare";
+        submitBtn.innerText = "Log In";
+        toggleBtn.innerText = "Need an account? Register here";
+        nameField.classList.add('hidden');
+      }
+    }
+
+    async function handleAuthSubmit(e) {
+      e.preventDefault();
+      const errDiv = document.getElementById('authError');
+      errDiv.classList.add('hidden');
+
+      const email = document.getElementById('authEmail').value;
+      const password = document.getElementById('authPassword').value;
+      const role = document.getElementById('authRole').value;
+      const name = document.getElementById('authName').value;
+
+      const endpoint = isRegisterMode ? '/api/auth/register' : '/api/auth/login';
+      const payload = isRegisterMode ? { name, email, password, role } : { email, password };
+
+      try {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+          errDiv.innerText = data.error || 'Authentication failed.';
+          errDiv.classList.remove('hidden');
+          return;
+        }
+
+        localStorage.setItem('ashacare_token', data.token);
+        currentUser = data.user;
+        hideAuthModal();
+        updateUserUI();
+      } catch (err) {
+        errDiv.innerText = 'Unable to connect to the server.';
+        errDiv.classList.remove('hidden');
+      }
+    }
 
     function changeLanguage() {
       currentLanguage = document.getElementById('langSelect').value;
@@ -363,7 +608,10 @@ const frontendHTML = `
       try {
         const res = await fetch('/api/cases', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + getAuthToken()
+          },
           body: JSON.stringify(caseRecord)
         });
         const savedData = await res.json();
@@ -420,17 +668,22 @@ const frontendHTML = `
     // API Integration - Doctor Dashboard
     async function renderDoctorTable(filter = 'ALL') {
       const tbody = document.getElementById('doctorCasesTable');
-      tbody.innerHTML = "<tr><td colspan='6' class='p-4 text-center text-slate-500'>Loading data from server...</td></tr>";
+      tbody.innerHTML = "<tr><td colspan='7' class='p-4 text-center text-slate-500'>Loading data from server...</td></tr>";
 
       try {
-        const res = await fetch('/api/cases');
+        const res = await fetch('/api/cases', {
+          headers: { 'Authorization': 'Bearer ' + getAuthToken() }
+        });
+
+        if (res.status === 401 || res.status === 403) return logout();
+
         cachedCases = await res.json();
         
         const filteredCases = cachedCases.filter(c => filter === 'ALL' || c.riskLevel === filter);
         tbody.innerHTML = '';
 
         if (filteredCases.length === 0) {
-          tbody.innerHTML = "<tr><td colspan='6' class='p-4 text-center text-slate-400 italic'>No patient records found</td></tr>";
+          tbody.innerHTML = "<tr><td colspan='7' class='p-4 text-center text-slate-400 italic'>No patient records found</td></tr>";
           return;
         }
 
@@ -446,17 +699,20 @@ const frontendHTML = `
             ? "<span class='px-2 py-0.5 rounded-full bg-slate-200 text-slate-700'>" + c.status + "</span>" 
             : "<span class='px-2 py-0.5 rounded-full bg-blue-100 text-blue-800'>" + c.status + "</span>";
 
+          const creatorName = c.createdBy ? c.createdBy.name : 'Unknown';
+
           tr.innerHTML = 
             "<td class='p-3 font-mono text-xs font-semibold text-slate-700'>" + c.caseId + "</td>" +
             "<td class='p-3 font-medium'>" + c.name + "</td>" +
             "<td class='p-3'>" + riskBadge + "</td>" +
             "<td class='p-3 text-xs text-slate-600 truncate max-w-xs'>" + c.symptoms + "</td>" +
+            "<td class='p-3 text-xs text-slate-500'>" + creatorName + "</td>" +
             "<td class='p-3 text-xs'>" + statusBadge + "</td>" +
             "<td class='p-3'><button onclick=\\"openExamModal('" + c.caseId + "')\\" class='text-xs text-teal-700 hover:text-teal-900 font-semibold underline'>Examine</button></td>";
           tbody.appendChild(tr);
         });
       } catch (err) {
-        tbody.innerHTML = "<tr><td colspan='6' class='p-4 text-center text-red-500'>Error connecting to database</td></tr>";
+        tbody.innerHTML = "<tr><td colspan='7' class='p-4 text-center text-red-500'>Error connecting to database</td></tr>";
       }
     }
 
@@ -487,7 +743,10 @@ const frontendHTML = `
       try {
         await fetch('/api/cases/' + activeExamCaseId, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + getAuthToken()
+          },
           body: JSON.stringify({ doctorNotes: notes, followUp: followUp, status: 'Resolved' })
         });
         closeModal();
@@ -509,9 +768,10 @@ app.get('/', (req, res) => {
 });
 
 // ==========================================
-// 4. SERVER INITIALIZATION
+// 5. SERVER INITIALIZATION
 // ==========================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`AshaCare Server running on port ${PORT}`);
+  console.log(`AshaCare Auth-Enabled Server running on port ${PORT}`);
 });
+
