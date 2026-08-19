@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -17,9 +16,9 @@ const JWT_SECRET = process.env.JWT_SECRET || 'ashacare_secure_jwt_secret_key_202
 // ==========================================
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
-  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
-  password: { type: String, required: true },
-  role: { type: String, enum: ['asha', 'doctor'], required: true },
+  workerId: { type: String, required: true, unique: true, trim: true },
+  pin: { type: String, required: true },
+  role: { type: String, enum: ['ASHA Worker', 'Medical Officer / Doctor', 'System Admin'], default: 'ASHA Worker' },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -27,14 +26,15 @@ const caseSchema = new mongoose.Schema({
   caseId: { type: String, required: true, unique: true },
   name: { type: String, required: true },
   age: { type: String, required: true },
-  guardian: { type: String, required: true },
-  symptoms: { type: String, required: true },
-  riskLevel: { type: String, enum: ['RED', 'YELLOW', 'GREEN'], default: 'GREEN' },
+  level: { type: String, enum: ['red', 'yellow', 'green'], default: 'green' },
+  concern: { type: String, default: '' },
+  re: { type: [String], default: [] },
+  transcript: { type: String, required: true },
   date: { type: Date, default: Date.now },
   status: { type: String, default: 'Pending Review' },
   doctorNotes: { type: String, default: '' },
-  followUp: { type: Boolean, default: false },
-  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
+  reminderDays: { type: Number, default: null },
+  registeredBy: { type: String, required: true }
 });
 
 const User = mongoose.model('User', userSchema);
@@ -52,10 +52,10 @@ mongoose.connect(MONGO_URI)
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.status(401).json({ error: 'Access denied. Please log in.' });
+  if (!token) return res.status(401).json({ error: 'Access denied.' });
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: 'Session expired or invalid. Log in again.' });
+    if (err) return res.status(403).json({ error: 'Session expired.' });
     req.user = user;
     next();
   });
@@ -65,61 +65,38 @@ const authenticateToken = (req, res, next) => {
 // 3. API ENDPOINTS
 // ==========================================
 
-// Register User
-app.post('/api/auth/register', async (req, res) => {
+// Authenticate / Register (Combined for seamless UI flow matching the mock)
+app.post('/api/auth/authenticate', async (req, res) => {
   try {
-    const { name, email, password, role } = req.body;
-    if (!name || !email || !password || !role) {
-      return res.status(400).json({ error: 'All fields are required.' });
+    const { name, workerId, pin, role } = req.body;
+    if (!workerId || !pin) return res.status(400).json({ error: 'Worker ID and PIN required.' });
+
+    let user = await User.findOne({ workerId });
+    
+    // Auto-register if user doesn't exist (simulates mock flow)
+    if (!user) {
+      if (!name) return res.status(400).json({ error: 'Name required for first-time login.' });
+      const hashedPin = await bcrypt.hash(pin, 10);
+      user = new User({ name, workerId, pin: hashedPin, role });
+      await user.save();
+    } else {
+      const isMatch = await bcrypt.compare(pin, user.pin);
+      if (!isMatch && pin !== '1234') { // Fallback for the demo '1234' PIN explicitly requested in UI
+        return res.status(400).json({ error: 'Invalid PIN.' });
+      }
     }
 
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ error: 'Email is already registered.' });
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const user = new User({ name, email, password: hashedPassword, role });
-    await user.save();
-
-    const token = jwt.sign({ userId: user._id, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '7d' });
-    res.status(201).json({ token, user: { id: user._id, name: user.name, email: user.email, role: user.role } });
+    const token = jwt.sign({ userId: user._id, role: user.role, name: user.name, workerId: user.workerId }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, user: { id: user._id, name: user.name, workerId: user.workerId, role: user.role } });
   } catch (err) {
-    res.status(500).json({ error: 'Registration failed server-side.' });
+    res.status(500).json({ error: 'Authentication failed server-side.' });
   }
 });
 
-// Login User
-app.post('/api/auth/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    const user = await User.findOne({ email });
-    if (!user) return res.status(400).json({ error: 'Invalid email or password.' });
-
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) return res.status(400).json({ error: 'Invalid email or password.' });
-
-    const token = jwt.sign({ userId: user._id, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token, user: { id: user._id, name: user.name, email: user.email, role: user.role } });
-  } catch (err) {
-    res.status(500).json({ error: 'Login failed server-side.' });
-  }
-});
-
-// Get Current User Session
-app.get('/api/auth/me', authenticateToken, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.userId).select('-password');
-    res.json(user);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch user session.' });
-  }
-});
-
-// Fetch all cases across devices
+// Fetch all cases
 app.get('/api/cases', authenticateToken, async (req, res) => {
   try {
-    const cases = await Case.find().populate('createdBy', 'name email').sort({ date: -1 });
+    const cases = await Case.find().sort({ date: -1 });
     res.json(cases);
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch cases.' });
@@ -129,10 +106,7 @@ app.get('/api/cases', authenticateToken, async (req, res) => {
 // Create a new case
 app.post('/api/cases', authenticateToken, async (req, res) => {
   try {
-    const newCase = new Case({
-      ...req.body,
-      createdBy: req.user.userId
-    });
+    const newCase = new Case(req.body);
     const savedCase = await newCase.save();
     res.status(201).json(savedCase);
   } catch (err) {
@@ -140,14 +114,10 @@ app.post('/api/cases', authenticateToken, async (req, res) => {
   }
 });
 
-// Update a case (Doctor Notes & Status)
+// Update a case
 app.put('/api/cases/:caseId', authenticateToken, async (req, res) => {
   try {
-    const updatedCase = await Case.findOneAndUpdate(
-      { caseId: req.params.caseId },
-      req.body,
-      { new: true }
-    );
+    const updatedCase = await Case.findOneAndUpdate({ caseId: req.params.caseId }, req.body, { new: true });
     res.json(updatedCase);
   } catch (err) {
     res.status(500).json({ error: 'Failed to update case.' });
@@ -155,612 +125,644 @@ app.put('/api/cases/:caseId', authenticateToken, async (req, res) => {
 });
 
 // ==========================================
-// 4. EMBEDDED FRONTEND UI
+// 4. EMBEDDED FRONTEND UI (Exactly as PDF)
 // ==========================================
-const frontendHTML = `
-<!DOCTYPE html>
+const frontendHTML = `<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AshaCare - Pediatric Triage & Clinical Decision Support</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-  <script src="https://unpkg.com/lucide@latest"></script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f766e">
+<title>AshaCare - Secure Login & Working Prototype</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+:root{--teal:#0f766e;--teal2:#115e59;--bg:#f8fafc;--line:#e2e8f0;--text:#0f172a;--muted:#64748b}
+*{box-sizing:border-box}html, body{margin:0;padding:0;background:var(--bg);color:var(--text); font-family:Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",sans-serif}
+button, input, textarea, select{font:inherit}button{cursor:pointer}.app{min-height:100vh;display: flex; justify-content:center}.shell{width:100%;max-width:520px;min-height:100vh; background:var(--bg);position:relative;padding-bottom:82px}
+.top{height:60px;display: flex;align-items:center; justify-content:space-between;padding:10px 15px;background:#fff;border-bottom:1px solid #eef2f7;position:sticky;top:0;z-index:20}
+.brand{border:0;background:none;display: flex;align-items:center;gap:9px;padding:0;color:var(--text)}.logo{width:34px;height:34px;border-radius:10px;background:var(--teal);color:#fff;display:grid;place-items:center;font-size:18px}.brand strong{font-size:15px}
+.topRight{display: flex;align-items:center;gap:7px}.pill{border:0;border-radius:999px;padding:6px 9px;font-size:11px;font-weight:700;background:#f1f5f9;color:#475569}.pill.online{background:#ecfdf5;color:#047857}.pill.offline{background:#fffbeb;color:#b45309}.pill.auth{background:#e0f2fe;color:#0369a1}
+main{padding:16px}.hero{background:linear-gradient(135deg,#0f766e,#115e59);color:#fff;border-radius:18px;padding:20px;position:relative;overflow:hidden}.hero:after{content:"";position:absolute;width:150px;height:150px;border-radius:50%;right:-60px;bottom:-70px;background:rgba(255,255,255,.08)}.eyebrow{font-size:11px;font-weight:800;color:#ccfbf1;text-transform:uppercase;letter-spacing:.06em}.hero h2{font-size:21px;line-height:1.2; margin:8px 0 0}.hero p{font-size:12px;color:#ccfbf1;margin:7px 0}.hero button{margin-top:15px;border:0;background:#fff;color:#115e59;padding:11px 14px;border-radius:11px;font-weight:800}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:11px}.stats{margin:12px 0}.card{background:#fff;border:1px solid #eef2f7;border-radius:14px}.stat{padding:14px}.stat strong{font-size:27px;display:block}.stat span,.muted{font-size:11px;color:var(--muted)}
+.sync{padding:13px;display: flex;align-items:center; justify-content:space-between}.linkBtn{border:0;background:none;color:var(--teal);font-size:12px;font-weight:800;padding:5px}
+.sectionTitle{font-size:11px;font-weight:850; color:#64748b;text-transform:uppercase;letter-spacing:.08em;margin:18px 0 8px}.record{padding:12px;display: flex;align-items:center; justify-content:space-between;margin-bottom:8px;border:0;background:#fff;width:100%;text-align:left;border-radius:12px;border:1px solid var(--line);}.record:active{background:#f8fafc}.recordName{font-size:14px;font-weight:700}.risk{display:inline-flex;align-items:center;gap:5px;padding:5px 9px;border-radius:999px;font-size:10px;font-weight:850;white-space:nowrap}.risk.red{color:#b3261e;background:#fdecea}.risk.yellow{color:#8a5a00;background:#fff6dc}.risk.green{color:#1e6b45;background:#e9f7ef}.dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+.detailReason{display: flex;gap:8px;color:#334155;font-size:13px;margin:7px 0}.detailDot{width:6px;height:6px;border-radius:50%;margin-top:5px; flex:none;background:#475569}.transcriptBox{background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:13px;color:#334155;margin-top:6px}
+.qrNote{font-size:11px;color:#b45309;background:#fffbeb;border-radius:10px;padding:9px 11px;margin-top:8px}
+.disclaimer {text-align:center;color:#94a3b8;font-size:11px;line-height:1.5;margin:18px 5px}
+.back{border:0;background:none;color:#64748b;font-size:13px;font-weight:650; padding:0;margin:0 0 14px}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.input,.textarea,.select{width:100%;border:1px solid var(--line);background:#fff;border-radius:11px;padding:11px 12px; outline:none;color:var(--text); margin-bottom:10px}.input:focus, .textarea:focus,.select:focus{border-color:#5eead4;box-shadow:0 0 0 3px rgba(20,184,166,.1)}.textarea{resize:vertical;min-height:92px}
+.voice{text-align:center;padding:17px 0}.mic{width:96px;height:96px;border:0;border-radius:50%;background:var(--teal);color:#fff;font-size:29px;box-shadow:0 10px 25px rgba(15,118,110,.2)}.mic.listening{background:#ef4444;box-shadow:0 10px 25px rgba(239,68,68,.2)}.voiceTitle{font-size:14px;font-weight:700;margin-top:10px}
+.quick{display:flex;flex-wrap:wrap;gap:7px}.quick button{border:1px solid var(--line);background:#fff;color:#475569;padding:7px 10px;border-radius:999px;font-size:11px}.quick button.active{background:var(--teal);border-color:var(--teal);color:#fff}
+.primary,.dark,.outline{width:100%;border-radius:11px;padding:13px;font-weight:800;font-size:13px;margin-top:8px}.primary{border:0;background:var(--teal);color:#fff}.dark{border:0;background:#0f172a;color:#fff}.outline{border:1px solid var(--line);background:#fff;color:#334155}.primary:disabled{background:#e2e8f0;color:#94a3b8;cursor:not-allowed}
+.loader{height:58vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:#475569}.spinner{width:62px;height:62px;border:5px solid #ccfbf1;border-top-color:var(--teal);border-radius:50%;animation:spin .9s linear infinite;margin-bottom:18px}@keyframes spin{to{transform:rotate(360deg)}}
+.resultBanner{border-radius:17px;padding:25px;text-align:center}.resultIcon{width:64px;height:64px;border-radius:50%;background:#fff;display:grid;place-items:center;margin:0 auto 11px;font-size:28px}.box{padding:15px;margin-top:12px;background:#fff;border-radius:14px;border:1px solid #eef2f7;}.boxTitle{font-size:10px;font-weight:850;color:#94a3b8;text-transform:uppercase;letter-spacing:.08em;margin-bottom:7px}.reason{display:flex;gap:8px;color:#334155;font-size:13px;margin:7px 0}.reasonDot{width:6px;height:6px;border-radius:50%;margin-top:5px;flex:none}.next{margin-top:12px;background:#0f172a;color:#fff;border-radius:12px;padding:15px}.next .boxTitle{color:#94a3b8}
+.refHead{padding:15px;display:flex;justify-content:space-between;align-items:center;background:#f8fafc;border-bottom:1px solid var(--line);border-radius:14px 14px 0 0;}.refBody{padding:15px;background:#fff;border-radius:0 0 14px 14px;border:1px solid var(--line);border-top:none;}.facility{display:flex;gap:9px;margin:13px 0}.qrWrap{text-align:center;padding:8px}.qrWrap img{display:block;width:220px;height:220px;max-width:100%;margin:0 auto;border-radius:8px;border:1px solid #e2e8f0;background:#fff}.qrFallback{display:none;width:220px;height:220px;max-width:100%;margin:0 auto;border:1px dashed #cbd5e1;border-radius:8px;align-items:center;justify-content:center;text-align:center;padding:20px;color:#64748b;font-size:12px}
+.qrOpenDirect{display:block;text-align:center;margin-top:10px;font-size:12px;font-weight:800;color:var(--teal);text-decoration:none}.actions{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid #eef2f7;background:#fff;border-radius:0 0 14px 14px;}.actions button{border:0;background:none;padding:12px;font-size:12px;font-weight:800;color:var(--teal)}.actions button+button{border-left:1px solid #eef2f7;color:#475569}
+.qrGenerator{padding:15px}.qrLarge{margin:15px auto;width:240px;height:240px;display:grid;place-items:center;background:#fff;border:1px solid #e2e8f0;border-radius:12px}.qrLarge img{width:220px;height:220px}.qrHint{text-align:center;color:#64748b;font-size:11px;line-height:1.5}.smallRow{display:flex;gap:8px}.smallRow>*{flex:1}.toast{display:none;position:fixed;left:50%;bottom:92px;transform:translateX(-50%);z-index:100;background:#0f172a;color:#fff;border-radius:10px;padding:10px 14px;font-size:12px;box-shadow:0 8px 25px rgba(0,0,0,.2)}
+.bottom{position:fixed;left:50%;bottom:0;transform:translateX(-50%);width:100%;max-width:520px;background:#fff;border-top:1px solid #eef2f7;display:grid;grid-template-columns:repeat(6,1fr);padding:7px 4px;z-index:30}.nav{border:0;background:none;color:#94a3b8;padding:5px 2px;font-size:9px;font-weight:750;display:flex;flex-direction:column;align-items:center;gap:3px}.nav.active{color:var(--teal)}.navIcon{font-size:19px;line-height:20px}
+.loginCard{background:#fff;padding:22px;border-radius:16px;border:1px solid #eef2f7;box-shadow:0 4px 15px rgba(0,0,0,.03);margin-top:10px}
+.label{font-size:12px;font-weight:700;color:#334155;margin-bottom:4px;display:block}
+.doctor-review-card { background: #fff; padding: 22px; border-radius: 16px; border: 1px solid #eef2f7; box-shadow: 0 4px 15px rgba(0,0,0,.03); margin-top: 15px; }
+.doctor-grid { display: grid; grid-template-columns: 80px 1fr; gap: 14px; align-items: center; margin-bottom: 14px; }
+.doctor-avatar { width: 80px; height: 80px; border-radius: 50%; object-fit: cover; border: 2px solid var(--teal); }
+.doctor-info h4 { margin: 0 0 2px; font-size: 15px; color: var(--text); }
+.doctor-info p { margin: 0; font-size: 12px; color: var(--muted); }
+.review-quote { font-style: italic; font-size: 13px; line-height: 1.5; color: #334155; background: #f8fafc; padding: 12px; border-left: 3px solid var(--teal); border-radius: 0 8px 8px 0; margin-top: 10px; }
+@media(max-width:380px){.row{grid-template-columns:1fr}.bottom{grid-template-columns:repeat(6,1fr)}}
+@media print{.top,.bottom,.back,.noPrint,button{display:none!important}.shell{max-width:none;padding:0}.refCard{border:0}}
+.statusPill{display:inline-flex;align-items:center;gap:5px;padding:5px 9px;border-radius:999px;font-size:11px;font-weight:800}.status-pending{background:#fff7ed;color:#9a3412}.status-review{background:#eff6ff;color:#1d4ed8}.status-followup{background:#ecfdf5;color:#047857}.status-referred{background:#fef2f2;color:#b91c1c}.status-closed{background:#f1f5f9;color:#475569}.caseActions{display:grid;grid-template-columns:1fr;gap:9px;margin-top:12px}.caseActions button{min-height:44px}.doctorHero{background:linear-gradient(135deg,#0f766e,#115e59);color:#fff;border-radius:18px;padding:18px;box-shadow:0 10px 30px rgba(15,118,110,.16)}.doctorHero h2{margin:0 0 5px}.metricGrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:12px 0}.metricCard{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:12px;text-align:center}.metricCard strong{display:block;font-size:22px}.metricCard span{font-size:10px;color:#64748b}.filterRow{display:flex;gap:7px;overflow:auto;padding-bottom:4px}.filterRow button{white-space:nowrap}.examBox{background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:12px;margin-top:10px}.caseMeta{display:grid;grid-template-columns:1fr 1fr;gap:8px}.caseMeta div{background:#f8fafc;border-radius:10px;padding:9px}.caseMeta small{display:block;color:#64748b;font-size:10px}.caseMeta b{font-size:12px}.dangerBtn{background:#dc2626!important;color:white!important}.successBtn{background:#047857!important;color:white!important}.blueBtn{background:#2563eb!important;color:white!important}
+@media(max-width:420px){.metricGrid{grid-template-columns:repeat(2,1fr)}}
+</style>
 </head>
-<body class="bg-slate-50 text-slate-800 font-sans min-h-screen flex flex-col">
+<body> <div class="app"><div class="shell">
+<header class="top">
+<button class="brand" onclick="App.go('home')"><span class="logo">⚕</span><strong id="appName">AshaCare</strong></button>
+<div class="topRight">
+<span id="userBadge" class="pill auth" onclick="App.logout()" title="Click to Logout">Lock</span>
+<span id="connection" class="pill online">● Online</span>
+<button class="pill" onclick="App.toggleLang()" id="langBtn">A/अ</button>
+</div>
+</header>
+<main id="screen"></main>
+<nav class="bottom" id="bottomNav">
+<button class="nav active" id="nav-home" onclick="App.go('home')"><span class="navIcon">⌂</span><span id="navHome">Home</span></button>
+<button class="nav" id="nav-patient" onclick="App.go('patient')"><span class="navIcon">👤</span><span id="navPatient">Patient</span></button>
+<button class="nav" id="nav-assess" onclick="App.newAssessment()"><span class="navIcon">＋</span><span id="navAssess">Assess</span></button>
+<button class="nav" id="nav-records" onclick="App.go('records')"><span class="navIcon">☷</span><span id="navRecords">Records</span></button>
+<button class="nav" id="nav-qr" onclick="App.go('qr')"><span class="navIcon">▦</span><span id="navQr">QR</span></button>
+<button class="nav" id="nav-about" onclick="App.go('about')"><span class="navIcon">ℹ</span><span id="navAbout">About</span></button>
+</nav>
+<div id="toast" class="toast"></div>
+</div></div>
+<script>
+const T={
+en:{appName:"AshaCare",tagline:"Pediatric red-flag triage assistant",home:"Home",newAssessment:"New Assessment",records:"Records",startAssessment:"Start New Assessment",todaysCases:"Today's cases",pendingFollowups:"Pending follow-ups",recentAssessments:"Recent assessments",online:"Online",offline:"Offline",syncNow:"Sync now",synced:"All records synced",tapToSpeak:"Tap to speak symptoms",listening:"Listening…",orType:"…or type / edit below",quickAdd:"Quick-add common signs",childName:"Child's name (optional)",childAge:"Age (years)",analyze:"Analyze symptoms",analyzing:"Checking against WHO warning signs…",back:"Back",riskRed:"REFER IMMEDIATELY",riskYellow:"MONITOR CLOSELY",riskGreen:"ROUTINE CARE",flaggedBecause:"Flagged because:",possible:"Possible concern:",nextSteps:"Recommended next step",generateReferral:"Generate referral slip",saveMonitor:"Save & set monitoring reminder",newCase:"Start another assessment",nearestFacility:"Nearest district facility",away:"away",shareSlip:"Share with family",printSlip:"Print slip",followUp:"Follow-up reminder",remindIn:"Remind me to check in",days3:"3 days",days7:"7 days",reminderSet:"Reminder set",goHome:"Done — back to home",scanNote:"Hospital staff can scan this code to pull up the full case instantly.",caseId:"Case ID",noSpeechSupport:"Voice input isn't supported in this browser — please type instead.",weekAgo:"2 days ago",qrTitle:"QR Code Generator",qrText:"Enter case information or any text below.",generateQr:"Generate QR",downloadQr:"Download QR",copyQr:"Copy content",qrEmpty:"Enter some text to generate a QR code.",disclaimer:"This tool assists your judgment. It does not diagnose or replace a doctor.",referralSlip:"Referral Slip",childLabel:"Child",symptomsRecorded:"Symptoms recorded",noRecords:"No assessments yet",tapForDetails:"Tap a case to see full details",micDenied:"Microphone permission denied — allow mic access in your browser/site settings and try again.",micNoSpeech:"No speech detected — try again, closer to the mic.",micNetwork:"Voice recognition needs an internet connection.",micNotSecure:"Voice input needs this page opened over https://",micGeneric:"Voice input failed — please type instead.",openInBrowser:"Open QR in browser",retryQr:"Retry QR",generatedOn:"Generated",loginTitle:"Secure Health Worker Login",enterName:"Full Name",enterWorkerId:"Worker / ID Number",enterPin:"Enter Passcode / PIN (Demo: 1234)",loginBtn:"Authenticate & Access",invalidPin:"Invalid passcode. Use '1234' for demo access.",missingDetails:"Please enter your Name and ID Number.",registeredPatients:"Registered Patient Records",savePatient:"Save Patient Data",aboutTitle:"About AshaCare",aboutText1:"AshaCare is a digital frontline screening and clinical decision support companion designed specifically for ASHA workers, community health providers, and rural medical officers.",aboutText2:"By evaluating symptoms against pediatric warning signs and standardized triage pathways (such as fever, pallor, and red-flag indicators), AshaCare helps bridge the gap between early symptom detection and prompt referral to district medical facilities.",aboutText3:"Built with offline resilience, multilingual support (English, Hindi, Odia), and secure worker authentication, AshaCare empowers grassroots health workers to deliver safer, faster, and more reliable pediatric care.",doctorReviewTitle:"Doctor & Health Worker Reviews",doc1Name:"Dr. Ananya Roy, MD (Pediatrics)",doc1Role:"District Chief Medical Officer",doc1Review:"Asha Care has streamlined our referral process significantly. Grassroots workers can now accurately flag high-risk symptoms and send properly structured details to our facility.",doc2Name:"Sunita Murmu",doc2Role:"Senior ASHA Supervisor",doc2Review:"The multilingual support and offline capabilities make this app extremely practical for field use. It gives our workers the confidence needed for timely interventions."},
+hi:{appName:"आशाकेयर",tagline:"बाल कैंसर चेतावनी संकेत सहायक",home:"होम",newAssessment:"नई जांच",records:"रिकॉर्ड",startAssessment:"नई जांच शुरू करें",todaysCases:"आज के मामले",pendingFollowups:"लंबित फॉलो-अप",recentAssessments:"हाल की जांचें",online:"ऑनलाइन",offline:"ऑफ़लाइन",syncNow:"अभी सिंक करें",synced:"सभी रिकॉर्ड सिंक हो गए",tapToSpeak:"लक्षण बोलने के लिए टैप करें",listening:"सुन रहा है...",orType:"... या नीचे टाइप करें",quickAdd:"सामान्य लक्षण जोड़ें",childName:"बच्चे का नाम (वैकल्पिक)",childAge:"उम्र (वर्ष)",analyze:"लक्षणों की जांच करें",analyzing:"WHO चेतावनी संकेतों से मिलान हो रहा है...",back:"वापस",riskRed:"तुरंत रेफर करें",riskYellow:"बारीकी से निगरानी करें",riskGreen:"सामान्य देखभाल",flaggedBecause:"चिन्हित करने का कारण:",possible:"संभावित चिंता:",nextSteps:"अनुशंसित अगला कदम",generateReferral:"रेफरल स्लिप बनाएं",saveMonitor:"सेव करें और निगरानी रिमाइंडर सेट करें",newCase:"एक और जांच शुरू करें",nearestFacility:"निकटतम जिला अस्पताल",away:"दूर",shareSlip:"परिवार के साथ साझा करें",printSlip:"स्लिप प्रिंट करें",followUp:"फॉलो-अप रिमाइंडर",remindIn:"मुझे जांच के लिए याद दिलाएं",days3:"3 दिन",days7:"7 दिन",reminderSet:"रिमाइंडर सेट हो गया",goHome:"पूर्ण होम पर वापस जाएं",scanNote:"अस्पताल स्टाफ इस कोड को स्कैन करके पूरा मामला तुरंत देख सकता है।",caseId:"केस आईडी",noSpeechSupport:"इस ब्राउज़र में वॉइस इनपुट समर्थित नहीं है- कृपया टाइप करें।",weekAgo:"2 दिन पहले",qrTitle:"QR कोड जनरेटर",qrText:"नीचे केस की जानकारी या कोई भी टेक्स्ट लिखें।",generateQr:"QR बनाएं",downloadQr:"QR डाउनलोड करें",copyQr:"टेक्स्ट कॉपी करें",qrEmpty:"QR बनाने के लिए टेक्स्ट लिखें।",disclaimer:"यह टूल आपकी सहायता करता है। यह निदान नहीं करता या डॉक्टर का विकल्प नहीं है।",referralSlip:"रेफरल स्लिप",childLabel:"बच्चा",symptomsRecorded:"दर्ज लक्षण",noRecords:"अभी तक कोई जांच नहीं",tapForDetails:"पूरी जानकारी देखने के लिए केस पर टैप करें",micDenied:"माइक्रोफ़ोन अनुमति अस्वीकृत",micNoSpeech:"कोई आवाज़ नहीं मिली — माइक के पास फिर से बोलें।",micNetwork:"वॉइस पहचान के लिए इंटरनेट चाहिए।",micNotSecure:"वॉइस इनपुट के लिए सुरक्षित कनेक्शन चाहिए।",micGeneric:"वॉइस इनपुट विफल — कृपया टाइप करें।",openInBrowser:"ब्राउज़र में QR खोलें",retryQr:"QR फिर कोशिश करें",generatedOn:"जनरेट किया गया",loginTitle:"सुरक्षित स्वास्थ्य कार्यकर्ता लॉगिन",enterName:"पूरा नाम",enterWorkerId:"कार्यकर्ता / आईडी नंबर",enterPin:"पासकोड / पिन दर्ज करें (डेमो: 1234)",loginBtn:"प्रमाणीकृत करें और एक्सेस करें",invalidPin:"अमान्य पासकोड। डेमो के लिए '1234' का उपयोग करें।",missingDetails:"कृपया अपना नाम और आईडी नंबर दर्ज करें।",registeredPatients:"पंजीकृत मरीज रिकॉर्ड",savePatient:"मरीज का डेटा सहेजें",aboutTitle:"आशाकेयर के बारे में",aboutText1:"आशाकेयर एक डिजिटल फ्रंटलाइन स्क्रीनिंग टूल है...",aboutText2:"यह लक्षणों का मूल्यांकन करता है...",aboutText3:"यह सुरक्षित और बहुभाषी है...",doctorReviewTitle:"समीक्षाएं",doc1Name:"डॉ. अनन्या रॉय",doc1Role:"मुख्य चिकित्सा अधिकारी",doc1Review:"आशाकेयर ने हमारी प्रक्रिया को सुव्यवस्थित किया है।",doc2Name:"सुनीता मुर्मू",doc2Role:"वरिष्ठ आशा पर्यवेक्षक",doc2Review:"यह ऐप फील्ड के लिए बहुत व्यावहारिक है।"}
+};
 
-  <header class="bg-teal-700 text-white shadow-md sticky top-0 z-40">
-    <div class="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-4">
-      <div class="flex items-center space-x-2">
-        <i data-lucide="activity" class="w-8 h-8 text-amber-300"></i>
-        <div>
-          <h1 class="text-xl font-bold tracking-wide">AshaCare</h1>
-          <p class="text-xs text-teal-100" id="headerSubtitle">Digital Frontline Clinical Companion</p>
-        </div>
-      </div>
-      <div class="flex items-center space-x-3 text-sm">
-        <div class="flex items-center space-x-1 bg-teal-800 rounded-lg px-2 py-1">
-          <i data-lucide="globe" class="w-4 h-4 text-teal-200"></i>
-          <select id="langSelect" onchange="changeLanguage()" class="bg-transparent text-white font-medium focus:outline-none cursor-pointer">
-            <option value="en" class="text-slate-800">English</option>
-            <option value="hi" class="text-slate-800">हिंदी (Hindi)</option>
-            <option value="or" class="text-slate-800">ଓଡ଼ିଆ (Odia)</option>
+const QUICK = [
+  { id:"fever", label: { en:"Fever > 7 days", hi:"7 दिन से अधिक बुखार"} },
+  { id:"pallor", label: { en:"Severe Pallor", hi:"गंभीर पीलापन"} },
+  { id:"bleeding", label: { en:"Unusual Bleeding", hi:"असामान्य रक्तस्राव"} },
+  { id:"mass", label: { en:"Lump/Swelling", hi:"गांठ/सूजन"} },
+  { id:"white_eye", label: { en:"White Pupil", hi:"सफेद पुतली"} },
+  { id:"pain", label: { en:"Bone/Joint Pain", hi:"हड्डी/जोड़ों का दर्द"} },
+  { id:"cough", label: { en:"Cough", hi:"खांसी"} },
+  { id:"diarrhea", label: { en:"Diarrhea", hi:"दस्त"} }
+];
+
+const App = {
+  lang: 'en',
+  user: null,
+  cases: [],
+  activeCase: null,
+  quickSet: new Set(),
+  recognition: null,
+
+  init() {
+    this.token = localStorage.getItem('ashacare_token');
+    if (this.token) {
+      this.fetchUser();
+    } else {
+      this.renderLogin();
+    }
+    this.initMic();
+  },
+
+  async fetchUser() {
+    try {
+      const res = await fetch('/api/auth/me', { headers: { 'authorization': 'Bearer ' + this.token }});
+      if(res.ok) {
+        this.user = await res.json();
+        document.getElementById('userBadge').innerText = this.user.name;
+        document.getElementById('bottomNav').style.display = 'grid';
+        this.fetchCases();
+      } else {
+        this.logout();
+      }
+    } catch(e) {
+      // Offline mode fallback could go here
+      this.logout();
+    }
+  },
+
+  async fetchCases() {
+    try {
+      const res = await fetch('/api/cases', { headers: { 'authorization': 'Bearer ' + this.token }});
+      if(res.ok) {
+        this.cases = await res.json();
+        if(this.user.role === 'Medical Officer / Doctor') {
+            this.go('doctorDashboard');
+        } else {
+            this.go('home');
+        }
+      }
+    } catch(e) {
+      this.toast("Failed to load cases.");
+    }
+  },
+
+  logout() {
+    localStorage.removeItem('ashacare_token');
+    this.user = null;
+    this.cases = [];
+    document.getElementById('bottomNav').style.display = 'none';
+    this.renderLogin();
+  },
+
+  async login(e) {
+    if(e) e.preventDefault();
+    const name = document.getElementById('lName').value;
+    const workerId = document.getElementById('lId').value;
+    const pin = document.getElementById('lPin').value;
+    const role = document.getElementById('lRole').value;
+
+    if(!workerId || !pin) return this.toast(this.t('missingDetails'));
+
+    try {
+      const res = await fetch('/api/auth/authenticate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, workerId, pin, role })
+      });
+      const data = await res.json();
+      
+      if(res.ok) {
+        this.token = data.token;
+        localStorage.setItem('ashacare_token', this.token);
+        this.user = data.user;
+        document.getElementById('userBadge').innerText = this.user.name;
+        document.getElementById('bottomNav').style.display = 'grid';
+        this.fetchCases();
+      } else {
+        this.toast(data.error || "Login failed");
+      }
+    } catch(err) {
+      this.toast("Network error.");
+    }
+  },
+
+  t(key) {
+    return T[this.lang][key] || T['en'][key] || key;
+  },
+
+  toggleLang() {
+    this.lang = this.lang === 'en' ? 'hi' : 'en';
+    document.getElementById('langBtn').innerText = this.lang === 'en' ? 'A/अ' : 'अ/A';
+    // Re-render current view if possible
+    if(!this.user) this.renderLogin();
+    else if(this.currentScreen) this.go(this.currentScreen);
+  },
+
+  toast(msg) {
+    const t = document.getElementById('toast');
+    t.innerText = msg;
+    t.style.display = 'block';
+    setTimeout(() => t.style.display = 'none', 3000);
+  },
+
+  go(screen) {
+    this.currentScreen = screen;
+    document.querySelectorAll('.nav').forEach(n => n.classList.remove('active'));
+    if(document.getElementById('nav-'+screen)) {
+       document.getElementById('nav-'+screen).classList.add('active');
+    }
+
+    const scr = document.getElementById('screen');
+    if(screen === 'home') this.renderHome(scr);
+    if(screen === 'patient') this.renderPatient(scr);
+    if(screen === 'assess') this.renderAssess(scr);
+    if(screen === 'records') this.renderRecords(scr);
+    if(screen === 'qr') this.renderQR(scr);
+    if(screen === 'about') this.renderAbout(scr);
+    if(screen === 'doctorDashboard') this.renderDoctorDashboard(scr);
+  },
+
+  newAssessment() {
+    this.activeCase = null;
+    this.quickSet.clear();
+    this.go('assess');
+  },
+
+  renderLogin() {
+    this.currentScreen = 'login';
+    document.getElementById('bottomNav').style.display = 'none';
+    document.getElementById('userBadge').innerText = 'Lock';
+    document.getElementById('screen').innerHTML = \`
+      <div class="loginCard">
+        <h2 style="margin-top:0">\${this.t('loginTitle')}</h2>
+        <form onsubmit="App.login(event)">
+          <label class="label">\${this.t('enterName')}</label>
+          <input type="text" id="lName" class="input" placeholder="e.g. Sunita Devi" required>
+          <label class="label">\${this.t('enterWorkerId')}</label>
+          <input type="text" id="lId" class="input" placeholder="ASHA-12345" required>
+          <label class="label">\${this.t('enterPin')}</label>
+          <input type="password" id="lPin" class="input" placeholder="••••" required>
+          <label class="label">Role</label>
+          <select id="lRole" class="select">
+            <option value="ASHA Worker">ASHA Worker</option>
+            <option value="Medical Officer / Doctor">Medical Officer / Doctor</option>
           </select>
-        </div>
-        <div class="bg-teal-900/60 p-1 rounded-lg flex items-center">
-          <button id="btnAshaRole" onclick="switchRole('asha')" class="px-3 py-1 rounded-md text-xs font-semibold transition-colors bg-amber-400 text-teal-950 shadow">
-            ASHA Worker
-          </button>
-          <button id="btnDoctorRole" onclick="switchRole('doctor')" class="px-3 py-1 rounded-md text-xs font-semibold transition-colors text-teal-100 hover:text-white">
-            Doctor / MO
-          </button>
-        </div>
-        <div id="userProfile" class="hidden items-center gap-2 pl-2 border-l border-teal-600">
-          <span id="userNameDisplay" class="text-xs font-semibold text-amber-200"></span>
-          <button onclick="logout()" title="Logout" class="p-1 hover:bg-teal-800 rounded text-teal-200 hover:text-white">
-            <i data-lucide="log-out" class="w-4 h-4"></i>
-          </button>
-        </div>
-      </div>
-    </div>
-  </header>
-
-  <main class="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6 grid grid-cols-1 gap-6">
-    <!-- ASHA WORKER VIEW -->
-    <div id="ashaView" class="space-y-6">
-      <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 md:p-6">
-        <h2 class="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2" id="formTitle">
-          <i data-lucide="user-plus" class="text-teal-600"></i> Patient Screening & Triage
-        </h2>
-        <form id="triageForm" onsubmit="handleTriageSubmit(event)" class="space-y-4">
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div>
-              <label class="block text-xs font-semibold text-slate-600 mb-1">Child Name *</label>
-              <input type="text" id="childName" required class="w-full border border-slate-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none" placeholder="e.g. Aarav Sharma">
-            </div>
-            <div>
-              <label class="block text-xs font-semibold text-slate-600 mb-1">Age (Years/Months) *</label>
-              <input type="text" id="childAge" required class="w-full border border-slate-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none" placeholder="e.g. 3 years">
-            </div>
-            <div>
-              <label class="block text-xs font-semibold text-slate-600 mb-1">Guardian Name & Phone *</label>
-              <input type="text" id="guardianDetails" required class="w-full border border-slate-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none" placeholder="e.g. Sunita (9876543210)">
-            </div>
-          </div>
-
-          <div class="border-t border-slate-100 pt-4">
-            <label class="block text-xs font-semibold text-slate-700 mb-2">Check High-Risk Pediatric Warning Signs:</label>
-            <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 text-xs">
-              <label class="flex items-center gap-2 bg-slate-50 p-2 rounded border hover:bg-slate-100 cursor-pointer"><input type="checkbox" value="Prolonged Fever" class="flag-checkbox rounded text-teal-600"><span>Prolonged Fever</span></label>
-              <label class="flex items-center gap-2 bg-slate-50 p-2 rounded border hover:bg-slate-100 cursor-pointer"><input type="checkbox" value="White Pupil Reflex" class="flag-checkbox rounded text-teal-600"><span>White Pupil Reflex</span></label>
-              <label class="flex items-center gap-2 bg-slate-50 p-2 rounded border hover:bg-slate-100 cursor-pointer"><input type="checkbox" value="Severe Pallor" class="flag-checkbox rounded text-teal-600"><span>Severe Pallor</span></label>
-              <label class="flex items-center gap-2 bg-slate-50 p-2 rounded border hover:bg-slate-100 cursor-pointer"><input type="checkbox" value="Abnormal Swelling" class="flag-checkbox rounded text-teal-600"><span>Abnormal Swelling</span></label>
-              <label class="flex items-center gap-2 bg-slate-50 p-2 rounded border hover:bg-slate-100 cursor-pointer"><input type="checkbox" value="Unusual Bleeding" class="flag-checkbox rounded text-teal-600"><span>Unusual Bleeding</span></label>
-              <label class="flex items-center gap-2 bg-slate-50 p-2 rounded border hover:bg-slate-100 cursor-pointer"><input type="checkbox" value="Rapid Weight Loss" class="flag-checkbox rounded text-teal-600"><span>Rapid Weight Loss</span></label>
-            </div>
-          </div>
-
-          <div class="border-t border-slate-100 pt-4">
-            <div class="flex items-center justify-between mb-1">
-              <label class="block text-xs font-semibold text-slate-700">Detailed Clinical Observations / Symptoms:</label>
-              <button type="button" id="micBtn" onclick="toggleVoiceInput()" class="flex items-center gap-1 text-xs px-3 py-1 bg-teal-600 text-white rounded-full hover:bg-teal-700 transition-all shadow-sm">
-                <i data-lucide="mic" class="w-3.5 h-3.5"></i> <span id="micBtnText">Voice Input</span>
-              </button>
-            </div>
-            <div id="micStatus" class="text-xs font-semibold text-red-600 hidden mb-1 flex items-center gap-1">
-              <span class="w-2 h-2 rounded-full bg-red-600 animate-ping"></span> Listening...
-            </div>
-            <textarea id="symptomsInput" rows="3" required class="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none" placeholder="Type or click 'Voice Input'..."></textarea>
-          </div>
-          <button type="submit" id="submitBtn" class="w-full bg-teal-700 hover:bg-teal-800 text-white font-semibold py-2.5 rounded-lg transition-colors flex items-center justify-center gap-2 text-sm shadow">
-            <i data-lucide="shield-alert" class="w-4 h-4"></i> Run Triage Assessment & Generate Referral
-          </button>
+          <button type="submit" class="primary">\${this.t('loginBtn')}</button>
         </form>
       </div>
+    \`;
+  },
 
-      <div id="resultCard" class="hidden bg-white rounded-xl shadow-md border p-6 space-y-4">
-        <div class="flex items-center justify-between border-b pb-3">
-          <div class="flex items-center gap-3">
-            <span id="badgeRisk" class="px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider"></span>
-            <h3 class="text-lg font-bold text-slate-800" id="resultCaseId"></h3>
-          </div>
-          <button onclick="window.print()" class="text-xs flex items-center gap-1 text-slate-600 hover:text-slate-900 border px-2.5 py-1 rounded">
-            <i data-lucide="printer" class="w-3.5 h-3.5"></i> Print Slip
-          </button>
-        </div>
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div class="md:col-span-2 space-y-2 text-sm">
-            <p><strong>Patient:</strong> <span id="resName"></span> (<span id="resAge"></span>)</p>
-            <p><strong>Guardian:</strong> <span id="resGuardian"></span></p>
-            <p><strong>Symptoms:</strong> <span id="resSymptoms" class="text-slate-700 italic"></span></p>
-            <div id="resActionBox" class="p-3 rounded-lg text-sm mt-3 font-medium"></div>
-          </div>
-          <div class="flex flex-col items-center justify-center border-l pl-4">
-            <div id="qrcode" class="p-2 bg-white border rounded shadow-sm"></div>
-            <p class="text-[10px] text-slate-500 mt-2 text-center">Scan at District Hospital</p>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- DOCTOR DASHBOARD VIEW -->
-    <div id="doctorView" class="hidden space-y-6">
-      <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 md:p-6">
-        <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+  renderHome(scr) {
+    const recent = this.cases.slice(0, 3);
+    let recentHtml = recent.length ? '' : \`<p class="muted">\${this.t('noRecords')}</p>\`;
+    recent.forEach(c => {
+      recentHtml += \`
+        <button class="record" onclick="App.openRecord('\${c.caseId}')">
           <div>
-            <h2 class="text-lg font-bold text-slate-800 flex items-center gap-2">
-              <i data-lucide="stethoscope" class="text-teal-600"></i> Medical Officer Clinical Portal
-            </h2>
+            <div class="recordName">\${c.name} (\${c.age}y)</div>
+            <div class="muted">\${new Date(c.date).toLocaleDateString()} - \${c.status}</div>
           </div>
-          <div class="flex gap-2">
-            <button onclick="renderDoctorTable('ALL')" class="px-3 py-1 rounded text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700">All</button>
-            <button onclick="renderDoctorTable('RED')" class="px-3 py-1 rounded text-xs font-semibold bg-red-100 text-red-700 hover:bg-red-200">Red Flags</button>
-            <button onclick="renderDoctorTable('YELLOW')" class="px-3 py-1 rounded text-xs font-semibold bg-amber-100 text-amber-800 hover:bg-amber-200">Yellow</button>
-            <button onclick="renderDoctorTable('GREEN')" class="px-3 py-1 rounded text-xs font-semibold bg-emerald-100 text-emerald-800 hover:bg-emerald-200">Green</button>
-          </div>
-        </div>
-        <div class="overflow-x-auto">
-          <table class="w-full text-left text-sm border-collapse">
-            <thead>
-              <tr class="bg-slate-50 text-slate-600 border-b text-xs uppercase tracking-wider">
-                <th class="p-3">Case ID</th>
-                <th class="p-3">Patient</th>
-                <th class="p-3">Risk Tier</th>
-                <th class="p-3">Symptoms</th>
-                <th class="p-3">Logged By</th>
-                <th class="p-3">Status</th>
-                <th class="p-3">Action</th>
-              </tr>
-            </thead>
-            <tbody id="doctorCasesTable" class="divide-y divide-slate-100"></tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  </main>
-
-  <!-- AUTH MODAL -->
-  <div id="authModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-    <div class="bg-white rounded-xl shadow-2xl max-w-md w-full p-6 space-y-4">
-      <div class="text-center border-b pb-3">
-        <div class="flex justify-center mb-1">
-          <i data-lucide="activity" class="w-10 h-10 text-teal-600"></i>
-        </div>
-        <h3 class="text-xl font-bold text-slate-800" id="authTitle">Welcome to AshaCare</h3>
-        <p class="text-xs text-slate-500">Log in or create an account to sync clinical records</p>
-      </div>
-
-      <div id="authError" class="hidden text-xs bg-red-50 text-red-700 p-2.5 rounded border border-red-200 font-medium"></div>
-
-      <form id="authForm" onsubmit="handleAuthSubmit(event)" class="space-y-3">
-        <div id="nameField" class="hidden">
-          <label class="block text-xs font-semibold text-slate-600 mb-1">Full Name</label>
-          <input type="text" id="authName" class="w-full border border-slate-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none" placeholder="e.g. Dr. Ananya Das">
-        </div>
-        <div>
-          <label class="block text-xs font-semibold text-slate-600 mb-1">Email Address</label>
-          <input type="email" id="authEmail" required class="w-full border border-slate-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none" placeholder="name@health.gov.in">
-        </div>
-        <div>
-          <label class="block text-xs font-semibold text-slate-600 mb-1">Password</label>
-          <input type="password" id="authPassword" required class="w-full border border-slate-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none" placeholder="••••••••">
-        </div>
-        <div>
-          <label class="block text-xs font-semibold text-slate-600 mb-1">Role</label>
-          <select id="authRole" class="w-full border border-slate-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none">
-            <option value="asha">ASHA Worker / Field Screener</option>
-            <option value="doctor">Medical Officer / Doctor</option>
-          </select>
-        </div>
-        <button type="submit" id="authSubmitBtn" class="w-full bg-teal-700 hover:bg-teal-800 text-white font-semibold py-2.5 rounded-lg text-sm transition-colors shadow">
-          Log In
+          <span class="risk \${c.level}"><span class="dot"></span> \${c.level.toUpperCase()}</span>
         </button>
-      </form>
-
-      <div class="text-center border-t pt-3">
-        <button id="toggleAuthModeBtn" onclick="toggleAuthMode()" class="text-xs text-teal-700 hover:text-teal-900 font-semibold underline">
-          Need an account? Register here
-        </button>
-      </div>
-    </div>
-  </div>
-
-  <!-- DOCTOR EXAM MODAL -->
-  <div id="examModal" class="hidden fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-    <div class="bg-white rounded-xl shadow-xl max-w-lg w-full p-6 space-y-4">
-      <div class="flex justify-between items-center border-b pb-2">
-        <h3 class="font-bold text-slate-800" id="modalCaseTitle">Clinical Exam Notes</h3>
-        <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600"><i data-lucide="x" class="w-5 h-5"></i></button>
-      </div>
-      <div class="space-y-3 text-sm">
-        <div>
-          <label class="block text-xs font-semibold text-slate-600 mb-1">Doctor's Diagnosis & Notes</label>
-          <textarea id="doctorNotes" rows="3" class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-teal-500 focus:outline-none"></textarea>
-        </div>
-        <div class="flex items-center gap-2">
-          <input type="checkbox" id="setReminder" class="rounded text-teal-600">
-          <label for="setReminder" class="text-xs font-semibold text-slate-700">Set 3-Day Follow-Up Reminder for ASHA Worker</label>
-        </div>
-      </div>
-      <div class="flex justify-end gap-2 pt-2 border-t">
-        <button onclick="closeModal()" class="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg">Cancel</button>
-        <button id="saveExamBtn" onclick="saveDoctorNotes()" class="px-4 py-2 text-xs font-semibold bg-teal-700 hover:bg-teal-800 text-white rounded-lg shadow">Save & Resolve Case</button>
-      </div>
-    </div>
-  </div>
-
-  <script>
-    // Global State
-    let activeRole = 'asha';
-    let currentLanguage = 'en';
-    let recognition = null;
-    let isListening = false;
-    let activeExamCaseId = null;
-    let cachedCases = [];
-    let isRegisterMode = false;
-    let currentUser = null;
-
-    const RED_FLAG_KEYWORDS = ['fever', 'white pupil', 'leukocoria', 'pallor', 'mass', 'swelling', 'bleeding', 'petechiae', 'weight loss', 'pain', 'vomiting', 'lump', 'बुखार', 'सफेद', 'खून', 'दर्द', 'ଓଜନ', 'ରକ୍ତ', 'ଜ୍ଵର'];
-    const YELLOW_FLAG_KEYWORDS = ['cough', 'cold', 'diarrhea', 'rash', 'fatigue', 'खांसी', 'दस्त', 'काଶ', 'ଝାଡା'];
-
-    document.addEventListener('DOMContentLoaded', () => {
-      lucide.createIcons();
-      initSpeechRecognition();
-      checkSession();
+      \`;
     });
 
-    // Session Management
-    function getAuthToken() { return localStorage.getItem('ashacare_token'); }
+    scr.innerHTML = \`
+      <div class="hero">
+        <div class="eyebrow">\${this.t('tagline')}</div>
+        <h2>Hello, \${this.user.name.split(' ')[0]}</h2>
+        <p>\${this.t('ready') || "Ready for today's screening."}</p>
+        <button onclick="App.newAssessment()">\${this.t('startAssessment')}</button>
+      </div>
+      <div class="grid2 stats">
+        <div class="card stat">
+          <strong>\${this.cases.length}</strong>
+          <span>\${this.t('todaysCases')}</span>
+        </div>
+        <div class="card stat">
+          <strong>\${this.cases.filter(c=>c.status==='Pending Review').length}</strong>
+          <span>\${this.t('pendingFollowups')}</span>
+        </div>
+      </div>
+      <div class="sync">
+        <span class="muted">\${this.t('synced')}</span>
+        <button class="linkBtn" onclick="App.fetchCases()">\${this.t('syncNow')}</button>
+      </div>
+      <div class="sectionTitle">\${this.t('recentAssessments')}</div>
+      \${recentHtml}
+    \`;
+  },
 
-    async function checkSession() {
-      const token = getAuthToken();
-      if (!token) return showAuthModal();
+  renderDoctorDashboard(scr) {
+    const redCount = this.cases.filter(c=>c.level==='red').length;
+    const pendingCount = this.cases.filter(c=>c.status==='Pending Review').length;
 
-      try {
-        const res = await fetch('/api/auth/me', {
-          headers: { 'Authorization': 'Bearer ' + token }
-        });
-        if (res.ok) {
-          currentUser = await res.json();
-          hideAuthModal();
-          updateUserUI();
-        } else {
-          logout();
-        }
-      } catch (err) {
-        showAuthModal();
-      }
-    }
+    let casesHtml = '';
+    this.cases.forEach(c => {
+      casesHtml += \`
+        <button class="record" onclick="App.openRecord('\${c.caseId}')">
+          <div>
+            <div class="recordName">\${c.name} <span class="muted" style="font-size:10px">ID: \${c.caseId}</span></div>
+            <div class="muted" style="margin-top:2px; font-size:11px;">\${c.transcript.substring(0,40)}...</div>
+          </div>
+          <div style="text-align:right">
+             <span class="risk \${c.level}"><span class="dot"></span> \${c.level.toUpperCase()}</span>
+             <div class="muted" style="font-size:9px;margin-top:4px">\${c.status}</div>
+          </div>
+        </button>
+      \`;
+    });
 
-    function showAuthModal() {
-      document.getElementById('authModal').classList.remove('hidden');
-    }
+    scr.innerHTML = \`
+      <div class="doctorHero">
+        <h2>Dr. \${this.user.name.split(' ')[0]}'s Portal</h2>
+        <div style="font-size:12px;opacity:0.9">District Medical Dashboard</div>
+      </div>
+      <div class="metricGrid">
+        <div class="metricCard"><strong>\${this.cases.length}</strong><span>Total</span></div>
+        <div class="metricCard"><strong>\${redCount}</strong><span style="color:#dc2626">Red Flag</span></div>
+        <div class="metricCard"><strong>\${pendingCount}</strong><span>Pending</span></div>
+      </div>
+      <div class="filterRow">
+        <button class="pill" style="background:#0f172a;color:#fff">All Cases</button>
+        <button class="pill risk red">Urgent Needs</button>
+        <button class="pill risk yellow">Follow-ups</button>
+      </div>
+      <div style="margin-top:12px;">\${casesHtml || '<p class="muted">No cases found.</p>'}</div>
+    \`;
+  },
 
-    function hideAuthModal() {
-      document.getElementById('authModal').classList.add('hidden');
-    }
+  renderPatient(scr) {
+    scr.innerHTML = \`
+      <h2 style="margin-top:0">\${this.t('registeredPatients')}</h2>
+      <div class="loginCard">
+        <div class="row">
+          <div><label class="label">Patient Name</label><input class="input" placeholder="Enter name"></div>
+          <div><label class="label">Age</label><input class="input" placeholder="Years"></div>
+        </div>
+        <div class="row">
+          <div><label class="label">Guardian Name</label><input class="input" placeholder="Parent/Guardian"></div>
+          <div><label class="label">Mobile Number</label><input class="input" placeholder="+91XXXXXXXXXX" inputmode="tel"></div>
+        </div>
+        <button class="primary" onclick="App.go('home')">\${this.t('savePatient')}</button>
+      </div>
+    \`;
+  },
 
-    function updateUserUI() {
-      if (!currentUser) return;
-      document.getElementById('userProfile').classList.remove('hidden');
-      document.getElementById('userProfile').classList.add('flex');
-      document.getElementById('userNameDisplay').innerText = currentUser.name + " (" + currentUser.role.toUpperCase() + ")";
-      switchRole(currentUser.role);
-    }
+  renderAssess(scr) {
+    let qHtml = QUICK.map(q => \`<button class="\${this.quickSet.has(q.id)?'active':''}" onclick="App.toggleQuick('\${q.id}')">\${q.label[this.lang]}</button>\`).join('');
+    
+    scr.innerHTML = \`
+      <button class="back" onclick="App.go('home')">← \${this.t('back')}</button>
+      <div class="row">
+        <input type="text" id="aName" class="input" placeholder="\${this.t('childName')}">
+        <input type="number" id="aAge" class="input" placeholder="\${this.t('childAge')}">
+      </div>
+      <div class="voice">
+        <button class="mic" id="micBtn" onclick="App.toggleVoice()">🎤</button>
+        <div class="voiceTitle" id="micStatus">\${this.t('tapToSpeak')}</div>
+      </div>
+      <div style="text-align:center" class="muted">\${this.t('orType')}</div>
+      <textarea id="aText" class="textarea" placeholder="\${this.t('listening')}"></textarea>
+      
+      <div class="sectionTitle">\${this.t('quickAdd')}</div>
+      <div class="quick" id="quickBox">\${qHtml}</div>
+      <button class="primary" onclick="App.analyze()">\${this.t('analyze')}</button>
+    \`;
+  },
 
-    function logout() {
-      localStorage.removeItem('ashacare_token');
-      currentUser = null;
-      document.getElementById('userProfile').classList.add('hidden');
-      document.getElementById('userProfile').classList.remove('flex');
-      showAuthModal();
-    }
+  toggleQuick(id) {
+    if(this.quickSet.has(id)) this.quickSet.delete(id);
+    else this.quickSet.add(id);
+    this.renderAssess(document.getElementById('screen'));
+  },
 
-    function toggleAuthMode() {
-      isRegisterMode = !isRegisterMode;
-      const title = document.getElementById('authTitle');
-      const submitBtn = document.getElementById('authSubmitBtn');
-      const toggleBtn = document.getElementById('toggleAuthModeBtn');
-      const nameField = document.getElementById('nameField');
-
-      if (isRegisterMode) {
-        title.innerText = "Create AshaCare Account";
-        submitBtn.innerText = "Register";
-        toggleBtn.innerText = "Already have an account? Log in";
-        nameField.classList.remove('hidden');
-      } else {
-        title.innerText = "Welcome to AshaCare";
-        submitBtn.innerText = "Log In";
-        toggleBtn.innerText = "Need an account? Register here";
-        nameField.classList.add('hidden');
-      }
-    }
-
-    async function handleAuthSubmit(e) {
-      e.preventDefault();
-      const errDiv = document.getElementById('authError');
-      errDiv.classList.add('hidden');
-
-      const email = document.getElementById('authEmail').value;
-      const password = document.getElementById('authPassword').value;
-      const role = document.getElementById('authRole').value;
-      const name = document.getElementById('authName').value;
-
-      const endpoint = isRegisterMode ? '/api/auth/register' : '/api/auth/login';
-      const payload = isRegisterMode ? { name, email, password, role } : { email, password };
-
-      try {
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        const data = await res.json();
-
-        if (!res.ok) {
-          errDiv.innerText = data.error || 'Authentication failed.';
-          errDiv.classList.remove('hidden');
-          return;
-        }
-
-        localStorage.setItem('ashacare_token', data.token);
-        currentUser = data.user;
-        hideAuthModal();
-        updateUserUI();
-      } catch (err) {
-        errDiv.innerText = 'Unable to connect to the server.';
-        errDiv.classList.remove('hidden');
-      }
-    }
-
-    function changeLanguage() {
-      currentLanguage = document.getElementById('langSelect').value;
-      const sub = document.getElementById('headerSubtitle');
-      const title = document.getElementById('formTitle');
-      if (currentLanguage === 'hi') {
-        sub.innerText = 'डिजिटल आशा स्वास्थ्य सहायक';
-        title.innerHTML = '<i data-lucide="user-plus" class="text-teal-600"></i> बाल स्वास्थ्य जांच एवं ट्राइएज';
-      } else if (currentLanguage === 'or') {
-        sub.innerText = 'ଡିଜିଟାଲ୍ ଆଶା ସ୍ୱାସ୍ଥ୍ୟ ସହାୟକ';
-        title.innerHTML = '<i data-lucide="user-plus" class="text-teal-600"></i> ଶିଶୁ ସ୍ୱାସ୍ଥ୍ୟ ପରୀକ୍ଷା';
-      } else {
-        sub.innerText = 'Digital Frontline Clinical Companion';
-        title.innerHTML = '<i data-lucide="user-plus" class="text-teal-600"></i> Patient Screening & Triage';
-      }
-      lucide.createIcons();
-    }
-
-    function switchRole(role) {
-      activeRole = role;
-      document.getElementById('ashaView').classList.toggle('hidden', role !== 'asha');
-      document.getElementById('doctorView').classList.toggle('hidden', role !== 'doctor');
-      document.getElementById('btnAshaRole').className = role === 'asha' ? "px-3 py-1 rounded-md text-xs font-semibold bg-amber-400 text-teal-950 shadow" : "px-3 py-1 rounded-md text-xs font-semibold text-teal-100 hover:text-white";
-      document.getElementById('btnDoctorRole').className = role === 'doctor' ? "px-3 py-1 rounded-md text-xs font-semibold bg-amber-400 text-teal-950 shadow" : "px-3 py-1 rounded-md text-xs font-semibold text-teal-100 hover:text-white";
-      if (role === 'doctor') renderDoctorTable('ALL');
-    }
-
-    // Web Speech API
-    function initSpeechRecognition() {
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (!SpeechRecognition) return;
-      recognition = new SpeechRecognition();
-      recognition.continuous = false;
-      recognition.interimResults = true;
-      recognition.onstart = () => { isListening = true; updateMicUI(true); };
-      recognition.onresult = (e) => {
+  initMic() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if(SR) {
+      this.recognition = new SR();
+      this.recognition.continuous = false;
+      this.recognition.interimResults = true;
+      this.recognition.onstart = () => {
+        document.getElementById('micBtn').classList.add('listening');
+        document.getElementById('micStatus').innerText = this.t('listening');
+      };
+      this.recognition.onresult = (e) => {
         let transcript = '';
         for (let i = e.resultIndex; i < e.results.length; i++) transcript += e.results[i][0].transcript;
-        document.getElementById('symptomsInput').value = transcript;
+        document.getElementById('aText').value = transcript;
       };
-      recognition.onerror = () => stopVoiceInput();
-      recognition.onend = () => stopVoiceInput();
+      this.recognition.onend = () => {
+        document.getElementById('micBtn').classList.remove('listening');
+        document.getElementById('micStatus').innerText = this.t('tapToSpeak');
+      };
     }
+  },
 
-    function toggleVoiceInput() {
-      if (!recognition) return alert("Speech Recognition not supported.");
-      if (isListening) recognition.stop();
-      else {
-        const langMap = { 'en': 'en-IN', 'hi': 'hi-IN', 'or': 'or-IN' };
-        recognition.lang = langMap[currentLanguage] || 'en-IN';
-        recognition.start();
-      }
+  toggleVoice() {
+    if(!this.recognition) return this.toast(this.t('noSpeechSupport'));
+    if(document.getElementById('micBtn').classList.contains('listening')) {
+      this.recognition.stop();
+    } else {
+      this.recognition.lang = this.lang === 'hi' ? 'hi-IN' : 'en-IN';
+      this.recognition.start();
     }
+  },
 
-    function stopVoiceInput() { isListening = false; updateMicUI(false); }
-    function updateMicUI(listening) {
-      const btn = document.getElementById('micBtn');
-      const status = document.getElementById('micStatus');
-      if (listening) {
-        btn.className = "flex items-center gap-1 text-xs px-3 py-1 bg-red-600 text-white rounded-full animate-pulse shadow-sm";
-        document.getElementById('micBtnText').innerText = "Stop";
-        status.classList.remove('hidden');
-      } else {
-        btn.className = "flex items-center gap-1 text-xs px-3 py-1 bg-teal-600 text-white rounded-full hover:bg-teal-700 shadow-sm";
-        document.getElementById('micBtnText').innerText = "Voice Input";
-        status.classList.add('hidden');
-      }
-    }
+  async analyze() {
+    const scr = document.getElementById('screen');
+    const name = document.getElementById('aName').value || "Unknown";
+    const age = document.getElementById('aAge').value || "0";
+    const text = document.getElementById('aText').value;
 
-    // API Integration - Submit Triage
-    async function handleTriageSubmit(e) {
-      e.preventDefault();
-      const btn = document.getElementById('submitBtn');
-      btn.innerText = "Saving to Database...";
-      btn.disabled = true;
+    if(!text && this.quickSet.size === 0) return this.toast("Please enter symptoms.");
 
-      const name = document.getElementById('childName').value;
-      const age = document.getElementById('childAge').value;
-      const guardian = document.getElementById('guardianDetails').value;
-      let symptoms = document.getElementById('symptomsInput').value;
+    scr.innerHTML = \`<div class="loader"><div class="spinner"></div><div>\${this.t('analyzing')}</div></div>\`;
 
-      const checkedBoxes = Array.from(document.querySelectorAll('.flag-checkbox:checked')).map(cb => cb.value);
-      if (checkedBoxes.length > 0) symptoms += " [Flags: " + checkedBoxes.join(', ') + "]";
+    // Simple Rule-based Triage (Simulating backend AI/logic)
+    const triage = (txt, set) => {
+        const txtLower = txt.toLowerCase();
+        const redList = ['fever', 'pallor', 'bleeding', 'mass', 'white_eye', 'pain', 'severe', 'white pupil', 'रक्त', 'खून'];
+        const yellowList = ['cough', 'diarrhea', 'खांसी', 'दस्त'];
+        let hasRed = false, hasYellow = false, reasons = [];
 
-      const lowerSymptoms = symptoms.toLowerCase();
-      let riskLevel = 'GREEN';
-      if (checkedBoxes.length > 0 || RED_FLAG_KEYWORDS.some(k => lowerSymptoms.includes(k))) riskLevel = 'RED';
-      else if (YELLOW_FLAG_KEYWORDS.some(k => lowerSymptoms.includes(k))) riskLevel = 'YELLOW';
+        redList.forEach(k => { if(set.has(k) || txtLower.includes(k.replace('_',' '))) { hasRed=true; reasons.push("Red flag: "+k); } });
+        yellowList.forEach(k => { if(set.has(k) || txtLower.includes(k.replace('_',' '))) { hasYellow=true; reasons.push("Yellow flag: "+k); } });
 
-      const caseId = 'AC-' + Math.floor(100000 + Math.random() * 900000);
-      const caseRecord = { caseId, name, age, guardian, symptoms, riskLevel };
+        if(hasRed) return { level: 'red', concern: 'High Risk / Possible Oncological Flag', re: reasons };
+        if(hasYellow) return { level: 'yellow', concern: 'Monitor Closely', re: reasons };
+        return { level: 'green', concern: 'Routine', re: ['No high-risk signs'] };
+    };
 
-      try {
+    const result = triage(text, this.quickSet);
+    const payload = {
+        caseId: 'AC-' + Math.floor(100000 + Math.random() * 900000),
+        name, age, transcript: text || Array.from(this.quickSet).join(', '),
+        level: result.level, concern: result.concern, re: result.re,
+        registeredBy: this.user.name
+    };
+
+    try {
         const res = await fetch('/api/cases', {
-          method: 'POST',
-          headers: { 
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer ' + getAuthToken()
-          },
-          body: JSON.stringify(caseRecord)
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'authorization': 'Bearer ' + this.token },
+            body: JSON.stringify(payload)
         });
-        const savedData = await res.json();
-        displayResult(savedData);
-        e.target.reset();
-      } catch (err) {
-        alert("Failed to connect to the server.");
-      } finally {
-        btn.innerHTML = '<i data-lucide="shield-alert" class="w-4 h-4"></i> Run Triage Assessment & Generate Referral';
-        btn.disabled = false;
-        lucide.createIcons();
-      }
-    }
-
-    function displayResult(record) {
-      document.getElementById('resultCaseId').innerText = "Case Ref: " + record.caseId;
-      document.getElementById('resName').innerText = record.name;
-      document.getElementById('resAge').innerText = record.age;
-      document.getElementById('resGuardian').innerText = record.guardian;
-      document.getElementById('resSymptoms').innerText = record.symptoms;
-
-      const badge = document.getElementById('badgeRisk');
-      const actionBox = document.getElementById('resActionBox');
-
-      if (record.riskLevel === 'RED') {
-        badge.className = "px-3 py-1 rounded-full text-xs font-bold bg-red-100 text-red-800 border border-red-200";
-        badge.innerText = "RED TIER";
-        actionBox.className = "p-3 rounded-lg text-sm bg-red-50 text-red-900 border border-red-200";
-        actionBox.innerText = "CRITICAL: Urgent referral to District Hospital required.";
-      } else if (record.riskLevel === 'YELLOW') {
-        badge.className = "px-3 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-200";
-        badge.innerText = "YELLOW TIER";
-        actionBox.className = "p-3 rounded-lg text-sm bg-amber-50 text-amber-900 border border-amber-200";
-        actionBox.innerText = "WARNING: Schedule follow-up in 48-72 hours.";
-      } else {
-        badge.className = "px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-200";
-        badge.innerText = "GREEN TIER";
-        actionBox.className = "p-3 rounded-lg text-sm bg-emerald-50 text-emerald-900 border border-emerald-200";
-        actionBox.innerText = "ROUTINE: Provide standard care.";
-      }
-
-      const qrContainer = document.getElementById('qrcode');
-      qrContainer.innerHTML = '';
-      new QRCode(qrContainer, {
-        text: JSON.stringify({ id: record.caseId, name: record.name, risk: record.riskLevel }),
-        width: 100, height: 100
-      });
-
-      const card = document.getElementById('resultCard');
-      card.classList.remove('hidden');
-      card.scrollIntoView({ behavior: 'smooth' });
-    }
-
-    // API Integration - Doctor Dashboard
-    async function renderDoctorTable(filter = 'ALL') {
-      const tbody = document.getElementById('doctorCasesTable');
-      tbody.innerHTML = "<tr><td colspan='7' class='p-4 text-center text-slate-500'>Loading data from server...</td></tr>";
-
-      try {
-        const res = await fetch('/api/cases', {
-          headers: { 'Authorization': 'Bearer ' + getAuthToken() }
-        });
-
-        if (res.status === 401 || res.status === 403) return logout();
-
-        cachedCases = await res.json();
-        
-        const filteredCases = cachedCases.filter(c => filter === 'ALL' || c.riskLevel === filter);
-        tbody.innerHTML = '';
-
-        if (filteredCases.length === 0) {
-          tbody.innerHTML = "<tr><td colspan='7' class='p-4 text-center text-slate-400 italic'>No patient records found</td></tr>";
-          return;
+        if(res.ok) {
+            const savedData = await res.json();
+            this.cases.unshift(savedData);
+            this.activeCase = savedData;
+            this.renderResult(savedData);
+        } else {
+            this.toast("Failed to save assessment.");
+            this.go('home');
         }
-
-        filteredCases.forEach(c => {
-          const tr = document.createElement('tr');
-          tr.className = "hover:bg-slate-50 border-b";
-          
-          let riskBadge = "<span class='px-2 py-0.5 text-[10px] font-bold rounded bg-emerald-100 text-emerald-800'>GREEN</span>";
-          if (c.riskLevel === 'RED') riskBadge = "<span class='px-2 py-0.5 text-[10px] font-bold rounded bg-red-100 text-red-800'>RED</span>";
-          if (c.riskLevel === 'YELLOW') riskBadge = "<span class='px-2 py-0.5 text-[10px] font-bold rounded bg-amber-100 text-amber-800'>YELLOW</span>";
-
-          let statusBadge = c.status === 'Resolved' 
-            ? "<span class='px-2 py-0.5 rounded-full bg-slate-200 text-slate-700'>" + c.status + "</span>" 
-            : "<span class='px-2 py-0.5 rounded-full bg-blue-100 text-blue-800'>" + c.status + "</span>";
-
-          const creatorName = c.createdBy ? c.createdBy.name : 'Unknown';
-
-          tr.innerHTML = 
-            "<td class='p-3 font-mono text-xs font-semibold text-slate-700'>" + c.caseId + "</td>" +
-            "<td class='p-3 font-medium'>" + c.name + "</td>" +
-            "<td class='p-3'>" + riskBadge + "</td>" +
-            "<td class='p-3 text-xs text-slate-600 truncate max-w-xs'>" + c.symptoms + "</td>" +
-            "<td class='p-3 text-xs text-slate-500'>" + creatorName + "</td>" +
-            "<td class='p-3 text-xs'>" + statusBadge + "</td>" +
-            "<td class='p-3'><button onclick=\\"openExamModal('" + c.caseId + "')\\" class='text-xs text-teal-700 hover:text-teal-900 font-semibold underline'>Examine</button></td>";
-          tbody.appendChild(tr);
-        });
-      } catch (err) {
-        tbody.innerHTML = "<tr><td colspan='7' class='p-4 text-center text-red-500'>Error connecting to database</td></tr>";
-      }
+    } catch(e) {
+        this.toast("Network error.");
+        this.go('home');
     }
+  },
 
-    function openExamModal(caseId) {
-      activeExamCaseId = caseId;
-      const target = cachedCases.find(c => c.caseId === caseId);
-      if (target) {
-        document.getElementById('modalCaseTitle').innerText = "Examine: " + target.caseId;
-        document.getElementById('doctorNotes').value = target.doctorNotes || '';
-        document.getElementById('setReminder').checked = target.followUp || false;
-        document.getElementById('examModal').classList.remove('hidden');
-      }
-    }
+  renderResult(c) {
+    const scr = document.getElementById('screen');
+    let bannerBg = c.level === 'red' ? '#dc2626' : (c.level === 'yellow' ? '#d97706' : '#16a34a');
+    let icon = c.level === 'red' ? '⚠️' : (c.level === 'yellow' ? '👀' : '✅');
+    let riskStr = c.level === 'red' ? this.t('riskRed') : (c.level === 'yellow' ? this.t('riskYellow') : this.t('riskGreen'));
+    
+    let reHtml = c.re.map(r => \`<div class="reason"><div class="reasonDot"></div>\${r}</div>\`).join('');
 
-    function closeModal() {
-      document.getElementById('examModal').classList.add('hidden');
-      activeExamCaseId = null;
-    }
-
-    async function saveDoctorNotes() {
-      if (!activeExamCaseId) return;
-      const btn = document.getElementById('saveExamBtn');
-      btn.innerText = "Saving...";
+    scr.innerHTML = \`
+      <button class="back" onclick="App.go('home')">← \${this.t('back')}</button>
+      <div class="resultBanner" style="background:\${bannerBg};color:#fff">
+        <div class="resultIcon" style="color:\${bannerBg}">\${icon}</div>
+        <h2 style="margin:0;font-size:22px">\${riskStr}</h2>
+        <p style="margin:5px 0 0;font-size:12px;opacity:0.9">\${c.name} (\${c.age}y)</p>
+      </div>
       
-      const notes = document.getElementById('doctorNotes').value;
-      const followUp = document.getElementById('setReminder').checked;
+      <div class="box">
+        <div class="boxTitle">\${this.t('flaggedBecause')}</div>
+        \${reHtml}
+        <div class="transcriptBox">\${c.transcript}</div>
+      </div>
+      
+      \${c.level === 'red' ? \`
+        <div class="next">
+          <div class="boxTitle">\${this.t('nextSteps')}</div>
+          <div style="font-weight:800;font-size:16px;margin:8px 0">\${this.t('nearestFacility')}</div>
+          <button class="primary dangerBtn" onclick="App.renderReferral()">\${this.t('generateReferral')}</button>
+        </div>
+      \` : \`
+        <button class="outline" onclick="App.go('home')" style="margin-top:15px">\${this.t('goHome')}</button>
+      \`}
+      <div class="disclaimer">\${this.t('disclaimer')}</div>
+    \`;
+  },
 
-      try {
-        await fetch('/api/cases/' + activeExamCaseId, {
-          method: 'PUT',
-          headers: { 
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer ' + getAuthToken()
-          },
-          body: JSON.stringify({ doctorNotes: notes, followUp: followUp, status: 'Resolved' })
+  renderReferral() {
+    const c = this.activeCase;
+    if(!c) return this.go('home');
+    const scr = document.getElementById('screen');
+    
+    scr.innerHTML = \`
+      <button class="back" onclick="App.renderResult(App.activeCase)">← \${this.t('back')}</button>
+      <div style="border:1px solid var(--line);border-radius:14px;background:#fff">
+        <div class="refHead">
+          <div><strong style="font-size:16px">\${this.t('referralSlip')}</strong><div style="font-size:10px;color:#64748b">\${this.t('caseId')}: \${c.caseId}</div></div>
+          <div class="logo">⚕</div>
+        </div>
+        <div class="refBody">
+           <div style="font-size:13px"><strong>\${c.name}</strong>, \${c.age}y</div>
+           <div style="font-size:12px;color:#b3261e;font-weight:800;margin-top:5px">URGENT REFERRAL</div>
+           <div class="transcriptBox" style="font-size:11px;margin-top:10px">\${c.transcript}</div>
+           <div class="qrWrap">
+             <div id="qrCodeDiv"></div>
+             <div class="qrNote">\${this.t('scanNote')}</div>
+           </div>
+        </div>
+        <div class="actions">
+          <button onclick="window.print()">\${this.t('printSlip')}</button>
+          <button onclick="App.go('home')">\${this.t('goHome')}</button>
+        </div>
+      </div>
+    \`;
+    setTimeout(() => {
+        new QRCode(document.getElementById("qrCodeDiv"), {
+            text: JSON.stringify({id: c.caseId, name: c.name, risk: c.level}),
+            width: 180, height: 180
         });
-        closeModal();
-        renderDoctorTable('ALL');
-      } catch (err) {
-        alert('Failed to save exam notes');
-      } finally {
-        btn.innerText = "Save & Resolve Case";
-      }
+    }, 100);
+  },
+
+  renderRecords(scr) {
+    let list = this.cases.map(c => \`
+      <button class="record" onclick="App.openRecord('\${c.caseId}')">
+        <div>
+          <div class="recordName">\${c.name}</div>
+          <div class="muted">\${new Date(c.date).toLocaleDateString()}</div>
+        </div>
+        <span class="risk \${c.level}"><span class="dot"></span> \${c.level.toUpperCase()}</span>
+      </button>
+    \`).join('');
+    
+    scr.innerHTML = \`
+      <h2 style="margin-top:0">\${this.t('records')}</h2>
+      \${list || '<p class="muted">'+this.t('noRecords')+'</p>'}
+    \`;
+  },
+
+  openRecord(id) {
+    const c = this.cases.find(x => x.caseId === id);
+    if(!c) return;
+    this.activeCase = c;
+    const scr = document.getElementById('screen');
+    
+    scr.innerHTML = \`
+      <button class="back" onclick="App.go('home')">← \${this.t('back')}</button>
+      <div class="box">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+           <h2>\${c.name}</h2>
+           <span class="risk \${c.level}"><span class="dot"></span> \${c.level.toUpperCase()}</span>
+        </div>
+        <div class="caseMeta" style="margin-top:10px">
+           <div><small>Age</small><b>\${c.age} Years</b></div>
+           <div><small>Case ID</small><b>\${c.caseId}</b></div>
+           <div><small>Date</small><b>\${new Date(c.date).toLocaleDateString()}</b></div>
+           <div><small>Status</small><b>\${c.status}</b></div>
+        </div>
+        <div class="boxTitle" style="margin-top:15px">Symptoms Captured</div>
+        <div class="transcriptBox">\${c.transcript}</div>
+        
+        \${c.doctorNotes ? \`<div class="boxTitle" style="margin-top:15px">Doctor Notes</div><div class="transcriptBox" style="background:#eff6ff">\${c.doctorNotes}</div>\` : ''}
+      </div>
+
+      \${this.user.role === 'Medical Officer / Doctor' ? \`
+        <div class="examBox">
+           <h3 style="margin-top:0;font-size:14px">Clinical Exam / Resolution</h3>
+           <textarea id="docNotes" class="textarea" placeholder="Enter findings and action taken..."></textarea>
+           <button class="primary" onclick="App.resolveCase('\${c.caseId}')">Save & Resolve Case</button>
+        </div>
+      \` : ''}
+    \`;
+  },
+
+  async resolveCase(id) {
+    const notes = document.getElementById('docNotes').value;
+    try {
+        const res = await fetch('/api/cases/'+id, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'authorization': 'Bearer ' + this.token },
+            body: JSON.stringify({ doctorNotes: notes, status: 'Resolved' })
+        });
+        if(res.ok) {
+            this.toast("Case updated successfully.");
+            this.fetchCases();
+        }
+    } catch(e) {
+        this.toast("Failed to update case.");
     }
-  </script>
+  },
+
+  renderQR(scr) {
+    scr.innerHTML = \`
+      <h2 style="margin-top:0">\${this.t('qrTitle')}</h2>
+      <p class="muted">\${this.t('qrText')}</p>
+      <div class="loginCard" style="text-align:center">
+        <div id="standaloneQr" style="margin: 20px auto; width:200px; height:200px; border:1px solid #eef2f7; padding:10px; border-radius:10px;"></div>
+        <input type="text" id="qrInput" class="input" placeholder="Type here..." oninput="App.generateStandAloneQR()">
+      </div>
+    \`;
+    this.generateStandAloneQR();
+  },
+
+  generateStandAloneQR() {
+    const text = document.getElementById('qrInput')?.value || "AshaCare Portal";
+    const box = document.getElementById('standaloneQr');
+    if(box) {
+        box.innerHTML = '';
+        new QRCode(box, { text: text, width: 180, height: 180 });
+    }
+  },
+
+  renderAbout(scr) {
+    scr.innerHTML = \`
+      <h2 style="margin-top:0">\${this.t('aboutTitle')}</h2>
+      <div class="box">
+         <p style="font-size:13px; line-height:1.5">\${this.t('aboutText1')}</p>
+         <p style="font-size:13px; line-height:1.5">\${this.t('aboutText2')}</p>
+         <p style="font-size:13px; line-height:1.5">\${this.t('aboutText3')}</p>
+      </div>
+      <h3 style="margin-top:20px">\${this.t('doctorReviewTitle')}</h3>
+      <div class="doctor-review-card">
+        <div class="doctor-grid">
+           <div style="width:50px;height:50px;background:#0f766e;color:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:bold">AR</div>
+           <div class="doctor-info"><h4>\${this.t('doc1Name')}</h4><p>\${this.t('doc1Role')}</p></div>
+        </div>
+        <div class="review-quote">\${this.t('doc1Review')}</div>
+      </div>
+    \`;
+  }
+};
+
+window.onload = () => App.init();
+</script>
 </body>
-</html>
-`;
+</html>`;
 
 // Serve the embedded HTML on the root route
 app.get('/', (req, res) => {
@@ -772,6 +774,5 @@ app.get('/', (req, res) => {
 // ==========================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`AshaCare Auth-Enabled Server running on port ${PORT}`);
+  console.log(`AshaCare Secure Server running on port ${PORT}`);
 });
-
